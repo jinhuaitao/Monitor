@@ -38,6 +38,18 @@ check_os() {
     fi
 }
 
+# --- 辅助函数：检测服务管理器 ---
+# 返回 1 为 Systemd, 2 为 OpenRC, 0 为未知
+get_init_system() {
+    if [ -f /run/systemd/system ] || [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+        return 1
+    elif [ -f /sbin/openrc-run ] || [ "$OS" = "alpine" ]; then
+        return 2
+    else
+        return 0
+    fi
+}
+
 # --- 辅助函数：安装依赖 ---
 install_deps() {
     if ! command -v curl >/dev/null 2>&1; then
@@ -50,18 +62,13 @@ install_deps() {
     fi
 }
 
-# --- 核心逻辑：安装 ---
+# --- 功能 1: 安装 ---
 do_install() {
     install_deps
+    
+    # 停止旧服务
+    do_stop >/dev/null 2>&1
 
-    # 1. 停止旧服务（如果存在），防止文件占用
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl stop "$SERVICE_NAME" >/dev/null 2>&1
-    elif command -v rc-service >/dev/null 2>&1; then
-        rc-service "$SERVICE_NAME" stop >/dev/null 2>&1
-    fi
-
-    # 2. 下载文件
     echo -e "${YELLOW}正在下载 monitor...${NC}"
     curl -L -o "$BIN_PATH" "$DOWNLOAD_URL"
     if [ $? -ne 0 ]; then
@@ -71,8 +78,10 @@ do_install() {
     chmod +x "$BIN_PATH"
     echo -e "${GREEN}下载并授权成功。${NC}"
 
-    # 3. 配置服务
-    if [ -f /run/systemd/system ] || [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+    get_init_system
+    INIT_SYS=$?
+
+    if [ $INIT_SYS -eq 1 ]; then
         # Systemd 安装
         echo -e "${YELLOW}配置 Systemd 服务...${NC}"
         cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
@@ -96,7 +105,7 @@ EOF
         systemctl start "$SERVICE_NAME"
         echo -e "${GREEN}安装完成！服务已启动 (Systemd)。${NC}"
 
-    elif [ -f /sbin/openrc-run ] || [ "$OS" = "alpine" ]; then
+    elif [ $INIT_SYS -eq 2 ]; then
         # OpenRC 安装
         echo -e "${YELLOW}配置 OpenRC 服务...${NC}"
         INIT_FILE="/etc/init.d/${SERVICE_NAME}"
@@ -125,33 +134,82 @@ EOF
     fi
 }
 
-# --- 核心逻辑：卸载 ---
+# --- 功能 2: 卸载 ---
 do_uninstall() {
     echo -e "${YELLOW}正在卸载...${NC}"
+    do_stop
+    
+    get_init_system
+    INIT_SYS=$?
 
-    # 1. 停止并移除服务
-    if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
-        systemctl stop "$SERVICE_NAME"
+    if [ $INIT_SYS -eq 1 ] && [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
         systemctl disable "$SERVICE_NAME"
         rm "/etc/systemd/system/${SERVICE_NAME}.service"
         systemctl daemon-reload
-        echo -e "已移除 Systemd 服务。"
-    elif [ -f "/etc/init.d/${SERVICE_NAME}" ]; then
-        rc-service "$SERVICE_NAME" stop
+        echo -e "已移除 Systemd 服务配置。"
+    elif [ $INIT_SYS -eq 2 ] && [ -f "/etc/init.d/${SERVICE_NAME}" ]; then
         rc-update del "$SERVICE_NAME" default
         rm "/etc/init.d/${SERVICE_NAME}"
-        echo -e "已移除 OpenRC 服务。"
-    else
-        echo -e "未检测到已安装的服务文件，跳过服务清理。"
+        echo -e "已移除 OpenRC 服务配置。"
     fi
 
-    # 2. 删除二进制文件
     if [ -f "$BIN_PATH" ]; then
         rm "$BIN_PATH"
         echo -e "已删除文件: $BIN_PATH"
     fi
-
     echo -e "${GREEN}卸载完成。${NC}"
+}
+
+# --- 功能 3: 启动 ---
+do_start() {
+    echo -e "${YELLOW}正在启动服务...${NC}"
+    get_init_system
+    INIT_SYS=$?
+    
+    if [ $INIT_SYS -eq 1 ]; then
+        systemctl start "$SERVICE_NAME"
+    elif [ $INIT_SYS -eq 2 ]; then
+        rc-service "$SERVICE_NAME" start
+    else
+        echo -e "${RED}未知的系统类型，无法启动。${NC}"
+        return
+    fi
+    echo -e "${GREEN}操作完成。${NC}"
+}
+
+# --- 功能 4: 停止 ---
+do_stop() {
+    echo -e "${YELLOW}正在停止服务...${NC}"
+    get_init_system
+    INIT_SYS=$?
+    
+    if [ $INIT_SYS -eq 1 ]; then
+        systemctl stop "$SERVICE_NAME"
+    elif [ $INIT_SYS -eq 2 ]; then
+        rc-service "$SERVICE_NAME" stop
+    fi
+    echo -e "${GREEN}操作完成。${NC}"
+}
+
+# --- 功能 5: 重启 ---
+do_restart() {
+    echo -e "${YELLOW}正在重启服务...${NC}"
+    do_stop
+    sleep 1
+    do_start
+}
+
+# --- 功能 6: 状态 ---
+do_status() {
+    echo -e "${BLUE}>>> 服务运行状态:${NC}"
+    get_init_system
+    INIT_SYS=$?
+    
+    if [ $INIT_SYS -eq 1 ]; then
+        systemctl status "$SERVICE_NAME" --no-pager
+    elif [ $INIT_SYS -eq 2 ]; then
+        rc-service "$SERVICE_NAME" status
+    fi
 }
 
 # --- 菜单界面 ---
@@ -163,25 +221,25 @@ echo -e "   系统: $OS | 路径: $CURRENT_DIR"
 echo -e "${BLUE}=====================================${NC}"
 echo -e "1. 安装 / 更新 (Install/Update)"
 echo -e "2. 卸载 (Uninstall)"
+echo -e "-------------------------------------"
+echo -e "3. 启动服务 (Start)"
+echo -e "4. 停止服务 (Stop)"
+echo -e "5. 重启服务 (Restart)"
+echo -e "6. 查看状态 (Status)"
+echo -e "-------------------------------------"
 echo -e "0. 退出 (Exit)"
 echo -e "${BLUE}=====================================${NC}"
 
-# 兼容 sh 的读取输入方式
-printf "请输入数字 [1-2]: "
+printf "请输入数字 [0-6]: "
 read choice
 
 case "$choice" in
-    1)
-        do_install
-        ;;
-    2)
-        do_uninstall
-        ;;
-    0)
-        exit 0
-        ;;
-    *)
-        echo -e "${RED}无效输入，退出。${NC}"
-        exit 1
-        ;;
+    1) do_install ;;
+    2) do_uninstall ;;
+    3) do_start ;;
+    4) do_stop ;;
+    5) do_restart ;;
+    6) do_status ;;
+    0) exit 0 ;;
+    *) echo -e "${RED}无效输入，退出。${NC}"; exit 1 ;;
 esac
