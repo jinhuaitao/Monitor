@@ -252,7 +252,7 @@ const htmlDashboard = `
 
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); backdrop-filter: blur(8px); z-index: 100; display: none; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.3s; }
         .modal-overlay.open { display: flex; opacity: 1; }
-        .modal { background: var(--bg-body); width: 90%; max-width: 900px; border-radius: 24px; border: 1px solid var(--glass-border); display: flex; flex-direction: column; height: 750px; max-height: 85vh; overflow: hidden; transform: scale(0.95); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); }
+        .modal { background: var(--bg-body); width: 90%; max-width: 900px; border-radius: 24px; border: 1px solid var(--glass-border); display: flex; flex-direction: column; height: 850px; max-height: 85vh; overflow: hidden; transform: scale(0.95); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); }
         .modal { background: var(--glass-bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
         .modal-overlay.open .modal { transform: scale(1); }
         
