@@ -1405,7 +1405,7 @@ func runServer(port string) {
 
 func monitorAlerts() {
 	for {
-		time.Sleep(10 * time.Second)
+		time.Sleep(5 * time.Second)
 		cacheMutex.RLock()
 		for id, s := range statusCache {
 			isOffline := time.Since(s.LastUpdate) > 30*time.Second
@@ -1512,56 +1512,81 @@ func runAgent(server, token, id string) {
 	fmt.Printf("Agent -> %s (ID:%s)\n", server, id)
 	url := fmt.Sprintf("%s/api/report?token=%s", server, token)
 	client := &http.Client{Timeout: 5 * time.Second}
-	
+
 	hostInfo, _ := host.Info()
 	osInfo := fmt.Sprintf("%s %s", hostInfo.Platform, hostInfo.PlatformVersion)
 
 	var lastIn, lastOut uint64; var lastTime time.Time
-	
 	currentTargets := []PingTargetConfig{{Target: "8.8.8.8:53"}}
 
+	// ▼▼▼▼▼▼▼▼▼▼▼▼ 新增：Ping 频率控制变量 ▼▼▼▼▼▼▼▼▼▼▼▼
+	// 这里设置 Ping 的间隔，例如 10 * time.Second 表示 10秒 Ping 一次
+	// 其他数据（CPU/内存）依然保持 2秒刷新一次
+	const pingInterval = 20 * time.Second 
+
+	var latestPingResults = make(map[string]int64) // 缓存 Ping 结果
+	var lastPingTime time.Time                     // 上次 Ping 的时间
+	// ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
 	for {
+		// 1. 获取系统基础数据 (保持每 2秒 获取一次)
 		cIdx, _ := cpu.Percent(0, false)
 		vm, _ := mem.VirtualMemory()
 		du, _ := disk.Usage("/")
 		nio, _ := gonet.IOCounters(false)
-		
-		cVal := 0.0; if len(cIdx)>0 { cVal=cIdx[0] }
-		curIn, curOut := uint64(0), uint64(0); if len(nio)>0 { curIn=nio[0].BytesRecv; curOut=nio[0].BytesSent }
-		
+
+		cVal := 0.0; if len(cIdx) > 0 { cVal = cIdx[0] }
+		curIn, curOut := uint64(0), uint64(0); if len(nio) > 0 { curIn = nio[0].BytesRecv; curOut = nio[0].BytesSent }
+
 		now := time.Now()
 		spIn, spOut := uint64(0), uint64(0)
 		if !lastTime.IsZero() {
 			d := now.Sub(lastTime).Seconds()
-			if d>0 {
-				if curIn>=lastIn { spIn=uint64(float64(curIn-lastIn)/d) }
-				if curOut>=lastOut { spOut=uint64(float64(curOut-lastOut)/d) }
+			if d > 0 {
+				if curIn >= lastIn { spIn = uint64(float64(curIn-lastIn) / d) }
+				if curOut >= lastOut { spOut = uint64(float64(curOut-lastOut) / d) }
 			}
 		}
-		lastIn,lastOut,lastTime = curIn,curOut,now
+		lastIn, lastOut, lastTime = curIn, curOut, now
 
-		pingResults := make(map[string]int64)
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		
-		for _, t := range currentTargets {
-			wg.Add(1)
-			go func(target string) {
-				defer wg.Done()
-				var ms int64
-				if strings.Contains(target, ":") {
-					start := time.Now()
-					if conn, err := net.DialTimeout("tcp", target, 2*time.Second); err == nil {
-						ms = time.Since(start).Milliseconds()
-						conn.Close()
+		// ▼▼▼▼▼▼▼▼▼▼▼▼ 修改：Ping 逻辑带时间锁 ▼▼▼▼▼▼▼▼▼▼▼▼
+		// 只有当距离上次 Ping 超过 pingInterval 时，才执行真正的 Ping 操作
+		if time.Since(lastPingTime) >= pingInterval {
+			// 创建临时 map 存储本次结果
+			tempResults := make(map[string]int64)
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+
+			for _, t := range currentTargets {
+				wg.Add(1)
+				go func(target string) {
+					defer wg.Done()
+					var ms int64
+					// 区分 TCP Ping (带冒号) 和 ICMP Ping
+					if strings.Contains(target, ":") {
+						start := time.Now()
+						if conn, err := net.DialTimeout("tcp", target, 2*time.Second); err == nil {
+							ms = time.Since(start).Milliseconds()
+							conn.Close()
+						}
+					} else {
+						ms = execPing(target)
 					}
-				} else {
-					ms = execPing(target)
-				}
-				if ms > 0 { mu.Lock(); pingResults[target] = ms; mu.Unlock() }
-			}(t.Target)
+					// 只有成功才记录
+					if ms > 0 { 
+						mu.Lock()
+						tempResults[target] = ms
+						mu.Unlock() 
+					}
+				}(t.Target)
+			}
+			wg.Wait()
+			
+			// 更新缓存和时间
+			latestPingResults = tempResults
+			lastPingTime = time.Now()
 		}
-		wg.Wait()
+		// ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
 		uptime, _ := host.Uptime()
 
@@ -1569,21 +1594,22 @@ func runAgent(server, token, id string) {
 			AgentID: id, OS: osInfo, Uptime: uptime,
 			CPUUsage: cVal, MemUsedPercent: vm.UsedPercent, DiskUsedPercent: du.UsedPercent,
 			NetInSpeed: spIn, NetOutSpeed: spOut, NetTotalIn: curIn, NetTotalOut: curOut,
-			PingResults: pingResults,
+			// 这里使用缓存的结果
+			PingResults: latestPingResults,
 		}
-		
+
 		d, _ := json.Marshal(s)
 		resp, err := client.Post(url, "application/json", bytes.NewBuffer(d))
-		
-		if err == nil { 
+
+		if err == nil {
 			body, _ := ioutil.ReadAll(resp.Body)
 			resp.Body.Close()
 			var serverResp AgentResponse
 			if json.Unmarshal(body, &serverResp) == nil {
 				if serverResp.Status == "stop" {
 					fmt.Println(">> 收到停止指令，Agent 正在停止...")
-					uninstallAgent() 
-					return 
+					uninstallAgent()
+					return
 				}
 				if len(serverResp.PingTargets) > 0 {
 					newStr, _ := json.Marshal(serverResp.PingTargets)
@@ -1591,11 +1617,15 @@ func runAgent(server, token, id string) {
 					if string(newStr) != string(oldStr) {
 						fmt.Printf("Config Update: Targets -> %s\n", newStr)
 						currentTargets = serverResp.PingTargets
+						// 配置更新后，重置时间，强制立即 Ping 一次
+						lastPingTime = time.Time{} 
 					}
 				}
 			}
 		}
-		time.Sleep(2 * time.Second)
+		
+		// 主循环依然保持 2秒 间隔，保证 CPU/内存 数据的实时性
+		time.Sleep(5 * time.Second)
 	}
 }
 
