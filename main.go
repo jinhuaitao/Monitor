@@ -189,7 +189,7 @@ const htmlDashboard = `
         .brand { font-weight: 800; font-size: 20px; color: var(--primary); display: flex; align-items: center; gap: 10px; letter-spacing: -0.5px; }
         .nav-right { display: flex; align-items: center; gap: 12px; }
         
-        .btn-icon { background: rgba(128,128,128,0.1); border: none; cursor: pointer; color: var(--text-main); width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
+        .btn-icon { background: rgba(128,128,128,0.1); border: none; cursor: pointer; color: var(--text-main); width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: 0.2s; text-decoration: none; }
         .btn-icon:hover { background: rgba(128,128,128,0.2); transform: rotate(15deg); }
         .btn-primary { background: linear-gradient(135deg, var(--primary), #818cf8); color: white; border: none; padding: 10px 20px; border-radius: 99px; font-size: 14px; font-weight: 600; cursor: pointer; text-decoration: none; box-shadow: 0 4px 10px rgba(79, 70, 229, 0.2); }
         .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(79, 70, 229, 0.3); }
@@ -318,7 +318,12 @@ const htmlDashboard = `
                 <button class="btn-primary" onclick="openSettings()"><span>⚙️ 系统管理</span></button>
                 <a href="/logout" class="btn-logout">退出</a>
             {{ else }}
-                <a href="/login" class="btn-primary">管理员登录</a>
+                <a href="/login" class="btn-icon" title="管理员登录">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="12" cy="7" r="4"></circle>
+                    </svg>
+                </a>
             {{ end }}
         </div>
     </div>
@@ -618,7 +623,7 @@ const htmlDashboard = `
         var tEl = document.getElementById('tokenInput'); if(tEl) tEl.value = currentToken;
         var uEl = document.getElementById('serverUrlInput'); if(uEl) uEl.value = customUrl;
         var tgEl = document.getElementById('tgToken'); if(tgEl) tgEl.value = tgToken;
-        var tcEl = document.getElementById('tgChat'); if(tcEl) tcEl.value = tgChat;
+        var tcEl = document.getElementById('tgChat'); if(tcEl) tgEl.value = tgChat;
         var whEl = document.getElementById('webhookUrl'); if(whEl) whEl.value = whUrl;
     }
     
