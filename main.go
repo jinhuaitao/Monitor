@@ -547,6 +547,30 @@ const htmlDashboard = `
         </div>
     </div>
 
+    <div class="modal-overlay" id="confirmModal">
+        <div class="modal" style="height:auto;max-height:auto;max-width:400px;text-align:center;padding:30px;">
+            <div style="width:60px;height:60px;background:rgba(239, 68, 68, 0.1);color:var(--danger);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;font-size:28px;">⚠️</div>
+            <h3 style="margin-top:0;margin-bottom:15px;font-size:18px;">确认删除此节点?</h3>
+            <p style="color:var(--text-sub);margin-bottom:25px;font-size:14px;line-height:1.6;">此操作无法撤销。如果该节点仍在线，它将收到停止指令并启动<b>自毁程序</b>。</p>
+            <div style="display:flex;justify-content:center;gap:15px">
+                <button class="btn-outline" style="min-width:100px" onclick="closeConfirm()">取消</button>
+                <button class="btn-primary" style="background:var(--danger);box-shadow:0 4px 10px rgba(239, 68, 68, 0.2);min-width:100px" onclick="executeDelete()">确定删除</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="tokenConfirmModal">
+        <div class="modal" style="height:auto;max-height:auto;max-width:400px;text-align:center;padding:30px;">
+            <div style="width:60px;height:60px;background:rgba(245, 158, 11, 0.1);color:var(--warning);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;font-size:28px;">🔑</div>
+            <h3 style="margin-top:0;margin-bottom:15px;font-size:18px;">修改通信 Token?</h3>
+            <p style="color:var(--text-sub);margin-bottom:25px;font-size:14px;line-height:1.6;">修改 Token 后，<b>所有已安装的 Agent 将立刻断开连接</b>。您必须使用新 Token 重新安装或配置所有节点。</p>
+            <div style="display:flex;justify-content:center;gap:15px">
+                <button class="btn-outline" style="min-width:100px" onclick="closeTokenConfirm()">取消</button>
+                <button class="btn-primary" style="background:var(--warning);border-color:var(--warning);min-width:100px" onclick="executeSaveToken()">确定修改</button>
+            </div>
+        </div>
+    </div>
+
 <script>
     function escapeHtml(text) {
         if (!text) return text;
@@ -763,10 +787,27 @@ const htmlDashboard = `
         fetch('/api/settings/url', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'url='+encodeURIComponent(u)})
         .then(function(){ customUrl=u; showToast('配置已保存'); });
     }
+
+    // 优化：Token 修改确认逻辑
     function saveToken() {
-        var t = document.getElementById('tokenInput').value;
-        if(confirm('修改Token需重启Agent，确定？')) fetch('/api/settings/token', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'token='+encodeURIComponent(t)}).then(function(){showToast('Token 已保存');});
+        document.getElementById('tokenConfirmModal').classList.add('open');
     }
+    function closeTokenConfirm() {
+        document.getElementById('tokenConfirmModal').classList.remove('open');
+    }
+    function executeSaveToken() {
+        var t = document.getElementById('tokenInput').value;
+        fetch('/api/settings/token', {
+            method:'POST',
+            headers:{'Content-Type':'application/x-www-form-urlencoded'},
+            body:'token='+encodeURIComponent(t)
+        })
+        .then(function(){
+            closeTokenConfirm();
+            showToast('Token 已保存');
+        });
+    }
+
     function loadNodeList() {
         if(!isAdmin) return;
         fetch('/api/stats').then(function(r){return r.json()}).then(function(data) {
@@ -797,7 +838,27 @@ const htmlDashboard = `
     
     function saveNode(id) { var n = document.getElementById('n-'+id).value; var s = document.getElementById('s-'+id).value; fetch('/api/settings/update_node', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+id+'&name='+encodeURIComponent(n)+'&sort='+s}).then(function(){loadNodeList(); updateStats(); showToast('节点信息已更新'); }); }
     function toggleHide(id) { fetch('/api/settings/toggle_hide', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+id}).then(function(){loadNodeList()}); }
-    function deleteNode(id) { if(confirm('确认删除?')) fetch('/api/settings/delete', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+id}).then(function(){loadNodeList()}); }
+    
+    // 优化：确认删除逻辑
+    var pendingDeleteId = null;
+    function deleteNode(id) { 
+        pendingDeleteId = id;
+        document.getElementById('confirmModal').classList.add('open');
+    }
+    function closeConfirm() {
+        document.getElementById('confirmModal').classList.remove('open');
+        pendingDeleteId = null;
+    }
+    function executeDelete() {
+        if(!pendingDeleteId) return;
+        fetch('/api/settings/delete', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+pendingDeleteId})
+        .then(function(){
+            loadNodeList();
+            closeConfirm();
+            showToast('🗑️ 节点已删除');
+        });
+    }
+    
     function saveAlert() { var t = document.getElementById('tgToken').value; var c = document.getElementById('tgChat').value; var w = document.getElementById('webhookUrl').value; fetch('/api/settings/alert', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'token='+encodeURIComponent(t)+'&chat='+encodeURIComponent(c)+'&webhook='+encodeURIComponent(w)}).then(function(){showToast('告警配置已保存');}); }
     function testAlert() { fetch('/api/settings/test_alert', {method:'POST'}).then(function(){showToast('测试消息已发送');}); }
     
@@ -850,7 +911,7 @@ const htmlLogin = `
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>登录 - Hub Monitor</title>
+    <title>{{ .Title }} - Hub Monitor</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         :root { 
@@ -947,7 +1008,7 @@ const htmlLogin = `
         <div class="brand">
             <div class="brand-icon">⚡</div>
             <h2>Hub Monitor</h2>
-            <p>请登录以管理您的节点</p>
+            <p>{{ .Subtitle }}</p>
         </div>
         <form method="POST" action="{{ .Action }}">
             <div class="form-group">
@@ -956,7 +1017,7 @@ const htmlLogin = `
             <div class="form-group">
                 <input type="password" name="password" class="input-field" placeholder="密码" required>
             </div>
-            <button type="submit" class="btn-submit">登 录</button>
+            <button type="submit" class="btn-submit">{{ .BtnText }}</button>
         </form>
         <div class="footer">&copy; 2024 Monitor System</div>
     </div>
@@ -1099,7 +1160,10 @@ func runServer(port string) {
 		bgType:=globalConfig.BgType; bgUrl:=globalConfig.BgCustomURL; bgBlur:=globalConfig.BgBlur; cardOp:=globalConfig.CardOpacity;
 		globalConfig.RUnlock()
 		t,_:=template.New("s").Parse(htmlLogin); t.Execute(c.Writer, map[string]interface{}{
-			"Action":"/setup", 
+			"Action":   "/setup", 
+			"Title":    "初始化设置", 
+			"Subtitle": "创建管理员账号", 
+			"BtnText":  "立即注册",
 			"Theme": theme,
 			"BgType": bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
 		})})
@@ -1116,7 +1180,10 @@ func runServer(port string) {
 		bgType:=globalConfig.BgType; bgUrl:=globalConfig.BgCustomURL; bgBlur:=globalConfig.BgBlur; cardOp:=globalConfig.CardOpacity;
 		globalConfig.RUnlock()
 		t,_:=template.New("l").Parse(htmlLogin); t.Execute(c.Writer, map[string]interface{}{
-			"Action":"/login", 
+			"Action":   "/login", 
+			"Title":    "登录", 
+			"Subtitle": "请登录以管理您的节点", 
+			"BtnText":  "登 录",
 			"Theme": theme,
 			"BgType": bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
 		})})
@@ -1536,14 +1603,11 @@ func runAgent(server, token, id string) {
 	var lastIn, lastOut uint64; var lastTime time.Time
 	currentTargets := []PingTargetConfig{{Target: "8.8.8.8:53"}}
 
-	// ▼▼▼▼▼▼▼▼▼▼▼▼ 新增：Ping 频率控制变量 ▼▼▼▼▼▼▼▼▼▼▼▼
-	// 这里设置 Ping 的间隔，例如 10 * time.Second 表示 10秒 Ping 一次
-	// 其他数据（CPU/内存）依然保持 2秒刷新一次
+	// Ping 频率控制变量
 	const pingInterval = 20 * time.Second 
 
 	var latestPingResults = make(map[string]int64) // 缓存 Ping 结果
 	var lastPingTime time.Time                     // 上次 Ping 的时间
-	// ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
 	for {
 		// 1. 获取系统基础数据 (保持每 2秒 获取一次)
@@ -1566,10 +1630,8 @@ func runAgent(server, token, id string) {
 		}
 		lastIn, lastOut, lastTime = curIn, curOut, now
 
-		// ▼▼▼▼▼▼▼▼▼▼▼▼ 修改：Ping 逻辑带时间锁 ▼▼▼▼▼▼▼▼▼▼▼▼
-		// 只有当距离上次 Ping 超过 pingInterval 时，才执行真正的 Ping 操作
+		// Ping 逻辑带时间锁
 		if time.Since(lastPingTime) >= pingInterval {
-			// 创建临时 map 存储本次结果
 			tempResults := make(map[string]int64)
 			var wg sync.WaitGroup
 			var mu sync.Mutex
@@ -1599,11 +1661,9 @@ func runAgent(server, token, id string) {
 			}
 			wg.Wait()
 			
-			// 更新缓存和时间
 			latestPingResults = tempResults
 			lastPingTime = time.Now()
 		}
-		// ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
 		uptime, _ := host.Uptime()
 
@@ -1611,14 +1671,12 @@ func runAgent(server, token, id string) {
 			AgentID: id, OS: osInfo, Uptime: uptime,
 			CPUUsage: cVal, MemUsedPercent: vm.UsedPercent, DiskUsedPercent: du.UsedPercent,
 			NetInSpeed: spIn, NetOutSpeed: spOut, NetTotalIn: curIn, NetTotalOut: curOut,
-			// 这里使用缓存的结果
 			PingResults: latestPingResults,
 		}
 
 		d, _ := json.Marshal(s)
 		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(d))
 		req.Header.Set("Content-Type", "application/json")
-		// 安全增强: Header 传输 Token
 		req.Header.Set("Authorization", token)
 		
 		resp, err := client.Do(req)
@@ -1639,31 +1697,64 @@ func runAgent(server, token, id string) {
 					if string(newStr) != string(oldStr) {
 						fmt.Printf("Config Update: Targets -> %s\n", newStr)
 						currentTargets = serverResp.PingTargets
-						// 配置更新后，重置时间，强制立即 Ping 一次
 						lastPingTime = time.Time{} 
 					}
 				}
 			}
 		}
 		
-		// 主循环依然保持 2秒 间隔，保证 CPU/内存 数据的实时性
 		time.Sleep(5 * time.Second)
 	}
 }
 
+// 修复后的自动卸载逻辑
 func uninstallAgent() {
-	if _, err := os.Stat("/etc/systemd/system/monitor.service"); err == nil {
-		exec.Command("systemctl", "stop", "monitor").Run()
-		exec.Command("systemctl", "disable", "monitor").Run()
-		os.Remove("/etc/systemd/system/monitor.service")
-		exec.Command("systemctl", "daemon-reload").Run()
-	} else if _, err := os.Stat("/etc/init.d/monitor"); err == nil {
-		exec.Command("rc-service", "monitor", "stop").Run()
-		exec.Command("rc-update", "del", "monitor").Run()
-		os.Remove("/etc/init.d/monitor")
-	}
+	fmt.Println(">> 收到卸载指令，开始执行自我销毁...")
+
+	// 1. 获取当前二进制文件的绝对路径
 	binPath, err := filepath.Abs(os.Args[0])
-	if err == nil { os.Remove(binPath) }
+	if err != nil {
+		fmt.Println("错误: 无法获取文件路径，将尝试使用默认路径")
+		binPath = "./monitor"
+	}
+
+	// 2. 根据系统类型清理服务配置
+	if _, err := os.Stat("/etc/alpine-release"); err == nil {
+		// ================= Alpine (OpenRC) 逻辑 =================
+		fmt.Println("-> 检测到 Alpine 系统，正在清理 OpenRC 服务...")
+		
+		exec.Command("rc-update", "del", "monitor").Run()
+		if err := os.Remove("/etc/init.d/monitor"); err == nil {
+			fmt.Println("✅ 服务脚本已删除 (/etc/init.d/monitor)")
+		} else {
+			fmt.Printf("⚠️ 删除服务脚本失败 (可能已不存在): %v\n", err)
+		}
+
+	} else {
+		// ================= Debian/Ubuntu/CentOS (Systemd) 逻辑 =================
+		fmt.Println("-> 检测到 Systemd 系统，正在清理服务...")
+
+		exec.Command("systemctl", "disable", "monitor").Run()
+		serviceFile := "/etc/systemd/system/monitor.service"
+		if err := os.Remove(serviceFile); err == nil {
+			fmt.Println("✅ 服务文件已删除 (/etc/systemd/system/monitor.service)")
+		} else {
+			fmt.Printf("⚠️ 删除服务文件失败 (可能已不存在): %v\n", err)
+		}
+		exec.Command("systemctl", "daemon-reload").Run()
+	}
+
+	// 3. 删除 Agent 二进制文件自身
+	if err := os.Remove(binPath); err == nil {
+		fmt.Println("✅ Agent 自身文件已删除")
+	} else {
+		fmt.Printf("⚠️ 删除自身文件失败: %v\n", err)
+		// 备用方案：尝试重命名
+		os.Rename(binPath, binPath+".del")
+	}
+
+	// 4. 退出进程，由系统守护进程尝试重启失败从而彻底终止
+	fmt.Println("👋 卸载完成，再见！")
 	os.Exit(0)
 }
 
