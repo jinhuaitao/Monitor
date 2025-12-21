@@ -30,14 +30,15 @@ Hub Monitor 是一款基于 Go + Gin + Gorm 开发的轻量级、高性能服务
 一、 环境准备
 服务器：一台拥有公网 IP 的 VPS（作为服务端）。
 
-# 方式一：一键脚本
+# 方式一：一键脚本（推荐）
 ```
 curl -o install.sh https://raw.githubusercontent.com/jinhuaitao/Monitor/master/install.sh && chmod +x install.sh && ./install.sh
 ```
-# 方式二：使用 Docker Compose（推荐）
+# 方式二：使用 Docker（推荐）
 这种方式最易于管理和升级。
 
-### 1.创建一个文件夹（例如 monitor），进入该文件夹。
+### 1.Docker Compose
+创建一个文件夹（例如 monitor），进入该文件夹。
 
 创建 docker-compose.yml 文件，内容如下：
 
