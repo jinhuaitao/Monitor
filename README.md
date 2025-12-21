@@ -30,8 +30,7 @@ Hub Monitor 是一款基于 Go + Gin + Gorm 开发的轻量级、高性能服务
 一、 环境准备
 服务器：一台拥有公网 IP 的 VPS（作为服务端）。
 
-# 方式一
-## 一键脚本
+# 方式一：一键脚本
 ```
 curl -o install.sh https://raw.githubusercontent.com/jinhuaitao/Monitor/master/install.sh && chmod +x install.sh && ./install.sh
 ```
