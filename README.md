@@ -30,87 +30,66 @@ Hub Monitor 是一款基于 Go + Gin + Gorm 开发的轻量级、高性能服务
 一、 环境准备
 服务器：一台拥有公网 IP 的 VPS（作为服务端）。
 
-环境：Go 1.20+ (仅编译阶段需要，运行时无需 Go 环境)。
-# 建议使用一键安装脚本
+# 方式一
 
 ```
 curl -o install.sh https://raw.githubusercontent.com/jinhuaitao/Monitor/master/install.sh && chmod +x install.sh && ./install.sh
 ```
-二、 服务端部署 (Dashboard)
-1. 编译项目
-在您的开发环境或服务器上：
+# 方式二：使用 Docker Compose（推荐）
+这种方式最易于管理和升级。
+
+创建一个文件夹（例如 monitor），进入该文件夹。
+
+创建 docker-compose.yml 文件，内容如下：
+
+```
+
+version: '3.8'
+
+services:
+  hub-monitor:
+    image: jhtone/hubmonitor:latest
+    container_name: hub-monitor
+    restart: always
+    ports:
+      - "8080:8080"
+    volumes:
+      # 挂载当前目录下的 data 文件夹到容器内的 /app
+      # 这里会保存 monitor.db 和下载用的二进制文件
+      - ./data:/app
+    environment:
+      # 设置时区，保证日志和监控时间正确
+      - TZ=Asia/Shanghai
+```
+启动服务：
+```
+docker-compose up -d
+```
+方式二：使用 Docker 命令行 (Docker CLI)
+如果您不想创建文件，直接在终端执行以下命令即可启动：
+```
+docker run -d --name hub-monitor --restart always -p 8080:8080 -v $(pwd)/data:/app -e TZ=Asia/Shanghai jhtone/hubmonitor:latest
+```
+(注意：$(pwd)/data 表示在当前目录下创建一个 data 文件夹用于挂载)
+
+✅ 启动后检查
+访问面板： 在浏览器输入 http://您的服务器IP:8080。
+
+检查数据持久化： 查看您服务器上的挂载目录（例如 ./data），您应该能看到生成了以下文件：
+
+monitor.db（数据库文件，请勿删除）
+
+monitor（二进制文件，用于 Agent 节点下载）
+
+查看日志（如果无法访问）：
 
 Bash
 
-# 1. 创建目录并初始化
-```
-mkdir hub-monitor && cd hub-monitor
-```
+docker logs -f hub-monitor
+❓ 常见问题
+端口冲突：如果 8080 已经被占用，修改冒号前面的端口，例如 -p 8088:8080。
 
-```
-go mod init hub-monitor
-```
-
-# 2. 将 main.go 放入该目录
-
-# 3. 下载依赖
-```
-go mod tidy
-```
-
-# 4. 编译 (Linux amd64)
-``` 
-CGO_ENABLED=1 go build -o monitor main.go
-```
-# 注意：因使用 SQLite，建议开启 CGO。如果报错缺少 gcc，请先安装 gcc。
-# Ubuntu/Debian: apt install build-essential
-# CentOS: yum groupinstall "Development Tools"
-2. 首次运行与配置
-编译完成后，直接运行：
-
-Bash
-
-```
-./monitor -mode server -port 8080
-```
-访问 http://ip:8080，系统会引导您创建管理员账号。
-
-3. 配置后台运行 (Systemd)
-为了让服务稳定运行，建议配置 Systemd。
-
-创建一个服务文件：
-```
-nano /etc/systemd/system/hub-monitor.service
-```
-
-
-```
-
-[Unit]
-Description=Hub Monitor Server
-After=network.target
-
-[Service]
-Type=simple
-# 请修改为你的实际路径
-WorkingDirectory=/root/hub-monitor
-ExecStart=/root/hub-monitor/monitor -mode server -port 8080
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-启动并设置开机自启：
-```
-systemctl daemon-reload
-systemctl enable hub-monitor
-systemctl start hub-monitor
-```
-4. (可选) 配置 Nginx 反向代理
-为了安全，建议配合 Nginx 使用 HTTPS。
-
+Agent 无法下载：在面板添加节点时，请确保填写的“面板公网地址”是 http://您的IP:端口，否则 Agent 无法找到下载链接。
 三、 客户端接入 (Agent)
 无需手动编译 Agent，面板内置了一键安装功能。
 
