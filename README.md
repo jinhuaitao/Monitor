@@ -31,7 +31,11 @@ Hub Monitor 是一款基于 Go + Gin + Gorm 开发的轻量级、高性能服务
 服务器：一台拥有公网 IP 的 VPS（作为服务端）。
 
 环境：Go 1.20+ (仅编译阶段需要，运行时无需 Go 环境)。
+# 建议使用一键安装脚本
 
+```
+curl -o install.sh https://raw.githubusercontent.com/jinhuaitao/Monitor/master/install.sh && chmod +x install.sh && ./install.sh
+```
 二、 服务端部署 (Dashboard)
 1. 编译项目
 在您的开发环境或服务器上：
@@ -47,7 +51,7 @@ mkdir hub-monitor && cd hub-monitor
 go mod init hub-monitor
 ```
 
-# 2. 将 main.go 放入该目录 (确保已修复 Bing API 问题)
+# 2. 将 main.go 放入该目录
 
 # 3. 下载依赖
 ```
@@ -141,6 +145,3 @@ Webhook：填写钉钉/飞书的 Webhook URL。
 
 3. 数据存在哪里？
 所有数据存储在运行目录下的 monitor.db (SQLite) 文件中。备份时只需备份此文件即可。
-```
-curl -o install.sh https://raw.githubusercontent.com/jinhuaitao/Monitor/master/install.sh && chmod +x install.sh && ./install.sh
-```
