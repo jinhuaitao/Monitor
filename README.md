@@ -39,16 +39,25 @@ Hub Monitor 是一款基于 Go + Gin + Gorm 开发的轻量级、高性能服务
 Bash
 
 # 1. 创建目录并初始化
+```
 mkdir hub-monitor && cd hub-monitor
+```
+
+```
 go mod init hub-monitor
+```
 
 # 2. 将 main.go 放入该目录 (确保已修复 Bing API 问题)
 
 # 3. 下载依赖
-```go mod tidy```
+```
+go mod tidy
+```
 
 # 4. 编译 (Linux amd64)
-``` CGO_ENABLED=1 go build -o monitor main.go```
+``` 
+CGO_ENABLED=1 go build -o monitor main.go
+```
 # 注意：因使用 SQLite，建议开启 CGO。如果报错缺少 gcc，请先安装 gcc。
 # Ubuntu/Debian: apt install build-essential
 # CentOS: yum groupinstall "Development Tools"
@@ -57,7 +66,9 @@ go mod init hub-monitor
 
 Bash
 
-```./monitor -mode server -port 8080```
+```
+./monitor -mode server -port 8080
+```
 访问 http://ip:8080，系统会引导您创建管理员账号。
 
 3. 配置后台运行 (Systemd)
