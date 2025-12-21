@@ -85,10 +85,11 @@ type AppConfig struct {
 type Node struct {
 	AgentID     string `gorm:"primaryKey"`
 	Name        string 
-	HideID      bool   `gorm:"default:false"`
+	HideID      bool   `gorm:"default:true"`
 	SortOrder   int    `gorm:"default:0"`
 	Denied      bool   `gorm:"default:false"`
 	CountryCode string 
+	CreatedAt   time.Time // [新增] 用于记录添加时间
 }
 
 type MonitorHistory struct {
@@ -121,6 +122,7 @@ type SystemStatus struct {
 	NetTotalOut     uint64             `json:"net_total_out"`
 	PingResults     map[string]int64   `json:"ping_results"`
 	LastUpdate      time.Time          `json:"last_update"`
+	InstallTime     int64              `json:"install_time"` // [新增] 用于前端排序
 }
 
 type AgentResponse struct {
@@ -812,7 +814,10 @@ const htmlDashboard = `
         if(!isAdmin) return;
         fetch('/api/stats').then(function(r){return r.json()}).then(function(data) {
             var el = document.getElementById('nodeList');
-            var ids = Object.keys(data).sort();
+            // [修改] 排序逻辑：按安装时间倒序 (新 -> 旧)
+            var ids = Object.keys(data).sort(function(a,b){
+                return (data[b].install_time||0) - (data[a].install_time||0);
+            });
             var html = '';
             if(ids.length===0) html='<div style="text-align:center;padding:20px;color:var(--text-sub)">暂无接入节点</div>';
             else ids.forEach(function(id) {
@@ -1280,6 +1285,7 @@ func runServer(port string) {
 					v.HideID = n.HideID
 					v.SortOrder = n.SortOrder
 					v.CountryCode = n.CountryCode
+					v.InstallTime = n.CreatedAt.Unix() // [新增] 注入安装时间戳
 					res[n.AgentID] = v
 				} else {
 					// 3. 如果缓存没有（新建未连接），构造一个“待机”状态
@@ -1291,6 +1297,7 @@ func runServer(port string) {
 						CountryCode: n.CountryCode,
 						OS:          "等待接入...", 
 						LastUpdate:  time.Time{}, // 零值，前端判定为离线
+						InstallTime: n.CreatedAt.Unix(), // [新增] 注入安装时间戳
 					}
 				}
 			}
