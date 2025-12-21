@@ -1332,16 +1332,32 @@ func runServer(port string) {
 
 		// Bing 壁纸代理
 		api.GET("/bing", func(c *gin.Context) {
-			resp, err := http.Get("https://cn.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1")
-			if err != nil { c.Status(500); return }
-			defer resp.Body.Close()
-			var res struct{ Images []struct{ Url string `json:"url"` } `json:"images"` }
-			if json.NewDecoder(resp.Body).Decode(&res) == nil && len(res.Images) > 0 {
-				c.Redirect(302, "https://cn.bing.com"+res.Images[0].Url)
-			} else {
-				c.Status(500)
-			}
-		})
+    // 1. 定义接口地址 (推荐使用 www 以获得更好的国际连通性，也可改回 cn)
+    const bingBase = "https://www.bing.com"
+    apiURL := bingBase + "/HPImageArchive.aspx?format=js&idx=0&n=1"
+
+    // 2. 创建请求
+    client := &http.Client{Timeout: 5 * time.Second}
+    req, err := http.NewRequest("GET", apiURL, nil)
+    if err != nil { c.Status(500); return }
+
+    // 3. 关键：伪装 User-Agent，防止被 Bing 拦截
+    req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+    // 4. 发起请求
+    resp, err := client.Do(req)
+    if err != nil { c.Status(500); return }
+    defer resp.Body.Close()
+
+    // 5. 解析并重定向
+    var res struct{ Images []struct{ Url string `json:"url"` } `json:"images"` }
+    if json.NewDecoder(resp.Body).Decode(&res) == nil && len(res.Images) > 0 {
+        // 拼接完整的图片地址并重定向
+        c.Redirect(302, bingBase+res.Images[0].Url)
+    } else {
+        c.Status(500)
+    }
+})
 
 		auth := api.Group("/")
 		auth.Use(authMiddleware())
