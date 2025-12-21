@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -73,7 +74,7 @@ var (
 type User struct {
 	ID       uint   `gorm:"primaryKey"`
 	Username string `gorm:"unique"`
-	Password string 
+	Password string // 格式: salt$hash
 }
 
 type AppConfig struct {
@@ -313,6 +314,51 @@ const htmlDashboard = `
         .toast-msg.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
         /* 暗色模式微调 */
         [data-theme="dark"] .toast-msg { background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.2); }
+
+        /* === 移动端深度优化 === */
+        @media (max-width: 768px) {
+            /* 弹窗布局：将侧边栏改为顶部水平滚动菜单 */
+            .modal-body { flex-direction: column; }
+            .sidebar { 
+                width: 100%; 
+                border-right: none; 
+                border-bottom: 1px solid rgba(128,128,128,0.1); 
+                padding: 10px; 
+                flex-direction: row; 
+                overflow-x: auto; 
+                gap: 10px; 
+                -webkit-overflow-scrolling: touch; /* 流畅滚动 */
+            }
+            .sidebar::-webkit-scrollbar { display: none; } /* 隐藏滚动条 */
+            
+            .sidebar-btn { 
+                padding: 8px 14px; 
+                font-size: 13px; 
+                margin: 0; 
+                white-space: nowrap; /* 文本不换行 */
+                flex-shrink: 0;
+            }
+            
+            .content-area { padding: 20px; }
+            
+            /* 信息详情网格：手机上改为单列 */
+            .info-grid { grid-template-columns: 1fr; gap: 10px; }
+            
+            /* 图表布局：手机上改为垂直堆叠 */
+            .charts-row { flex-direction: column; }
+            .chart-box { height: 180px; } 
+            
+            /* 输入框防放大 & 触摸区域优化 */
+            .input-text { font-size: 16px; } 
+            .btn-primary, .btn-del, .btn-outline { padding: 10px 16px; }
+            
+            /* 监控目标列表高度限制 */
+            .target-list { max-height: 250px; }
+            
+            /* 系统管理-节点列表行优化：垂直排列 */
+            .node-row { flex-direction: column; align-items: stretch; gap: 10px; }
+            .node-row > div:last-child { justify-content: flex-end; }
+        }
     </style>
 </head>
 <body>
@@ -487,7 +533,7 @@ const htmlDashboard = `
                 <h4 style="margin-top:20px;margin-bottom:15px;font-size:14px;color:var(--text-sub);">网络延迟 (Ping)</h4>
                 <div class="chart-box"><canvas id="pingChart"></canvas></div>
                 
-                <div style="display:flex;gap:15px;">
+                <div class="charts-row" style="display:flex;gap:15px;">
                     <div style="flex:1">
                         <h4 style="margin-top:10px;margin-bottom:10px;font-size:14px;color:var(--text-sub);">CPU 使用率</h4>
                         <div class="chart-box" style="height:150px"><canvas id="cpuChart"></canvas></div>
@@ -502,6 +548,16 @@ const htmlDashboard = `
     </div>
 
 <script>
+    function escapeHtml(text) {
+        if (!text) return text;
+        return text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+
     function getFlagEmoji(countryCode) {
         if (!countryCode || countryCode.length !== 2) return '';
         const codePoints = countryCode.toUpperCase().split('').map(char =>  127397 + char.charCodeAt());
@@ -591,7 +647,6 @@ const htmlDashboard = `
         var whEl = document.getElementById('webhookUrl'); if(whEl) whEl.value = whUrl;
     }
     
-    // ▼▼▼▼▼▼▼▼▼▼▼▼ 修改：创建并自动复制 + Toast 提示 ▼▼▼▼▼▼▼▼▼▼▼▼
     function showToast(msg) {
         var t = document.getElementById('toast');
         t.innerText = msg;
@@ -612,7 +667,6 @@ const htmlDashboard = `
         .then(function(data){
             if(data.status === 'ok') {
                 copyTextToClipboard(data.cmd);
-                // 修改：使用 Toast 提示
                 showToast("✅ 节点 [" + name + "] 创建成功，命令已复制！");
                 document.getElementById('newNodeName').value = ''; 
                 loadNodeList(); 
@@ -642,7 +696,6 @@ const htmlDashboard = `
             document.body.removeChild(textArea);
         }
     }
-    // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
     function formatBytes(b) { if(b===0)return'0 B'; var i=Math.floor(Math.log(b)/Math.log(1024)); return parseFloat((b/Math.pow(1024,i)).toFixed(1))+' '+['B','KB','MB','GB','TB'][i]; }
     function formatSpeed(b) { return formatBytes(b)+'/s'; }
@@ -665,7 +718,7 @@ const htmlDashboard = `
                 var s = data[id];
                 var online = (new Date()-new Date(s.last_update))/1000 < 25;
                 var flag = getFlagEmoji(s.country_code);
-                var displayName = s.hide_id ? (s.name||s.agent_id) : (s.name ? s.name+'<br><span style="font-size:12px;color:var(--text-sub);font-weight:400">'+s.agent_id+'</span>' : s.agent_id);
+                var displayName = s.hide_id ? (s.name||s.agent_id) : (s.name ? escapeHtml(s.name)+'<br><span style="font-size:12px;color:var(--text-sub);font-weight:400">'+s.agent_id+'</span>' : s.agent_id);
                 
                 var cpuU = s.cpu_usage || 0;
                 var memU = s.mem_used_percent || 0;
@@ -728,13 +781,12 @@ const htmlDashboard = `
                 // 构造安装命令
                 var serverAddr = customUrl || window.location.origin;
                 var cmd = "curl -L -o monitor " + serverAddr + "/api/download && chmod +x monitor && ./monitor -mode install -server " + serverAddr + " -token " + currentToken + " -id " + id;
-                // 转义处理，避免HTML属性截断
                 var safeCmd = cmd.replace(/"/g, '&quot;');
 
-                html+='<div class="node-row"><div style="flex:1;font-weight:600">'+(s.name||s.agent_id)+'<div style="font-size:12px;color:var(--text-sub);font-weight:400">'+s.agent_id+'</div></div>' +
+                html+='<div class="node-row"><div style="flex:1;font-weight:600">'+(escapeHtml(s.name)||s.agent_id)+'<div style="font-size:12px;color:var(--text-sub);font-weight:400">'+s.agent_id+'</div></div>' +
                 '<div style="display:flex;gap:8px;align-items:center"><button class="btn-outline" style="opacity:'+op+'" onclick="toggleHide(\''+id+'\')">👁️</button>' +
                 '<input type="number" class="input-text" style="width:60px;padding:8px;text-align:center" value="'+sort+'" placeholder="排序" id="s-'+id+'">' +
-                '<input type="text" class="input-text" style="width:120px;padding:8px" value="'+(s.name||'')+'" placeholder="设置别名" id="n-'+id+'">' +
+                '<input type="text" class="input-text" style="width:120px;padding:8px" value="'+(escapeHtml(s.name)||'')+'" placeholder="设置别名" id="n-'+id+'">' +
                 '<button class="btn-primary btn-sm" onclick="saveNode(\''+id+'\')">保存</button>' +
                 '<button class="btn-outline btn-sm" onclick="copyTextToClipboard(\'' + safeCmd + '\')" title="复制安装命令">📋</button>' + 
                 '<button class="btn-del" onclick="deleteNode(\''+id+'\')">🗑️</button></div></div>';
@@ -750,14 +802,14 @@ const htmlDashboard = `
     function testAlert() { fetch('/api/settings/test_alert', {method:'POST'}).then(function(){showToast('测试消息已发送');}); }
     
     function loadGlobalTargets() { if(!isAdmin) return; fetch('/api/settings/get_global_targets').then(function(r){return r.json()}).then(function(data){ currentTargets = data || []; renderTargets(); }); }
-    function renderTargets() { var html = ''; if(currentTargets.length === 0) html = '<div style="text-align:center;color:var(--text-sub);padding:30px;background:rgba(128,128,128,0.02);border-radius:12px;">暂无监控目标</div>'; currentTargets.forEach(function(t, idx){ var display = t.alias ? (t.alias + ' <span style="color:var(--text-sub);font-size:12px;margin-left:5px">(' + t.target + ')</span>') : t.target; html += '<div class="target-item"><div style="flex:1;">' + display + '</div><button class="btn-del" onclick="removeTarget(' + idx + ')">&times;</button></div>'; }); document.getElementById('targetList').innerHTML = html; }
+    function renderTargets() { var html = ''; if(currentTargets.length === 0) html = '<div style="text-align:center;color:var(--text-sub);padding:30px;background:rgba(128,128,128,0.02);border-radius:12px;">暂无监控目标</div>'; currentTargets.forEach(function(t, idx){ var display = t.alias ? (escapeHtml(t.alias) + ' <span style="color:var(--text-sub);font-size:12px;margin-left:5px">(' + escapeHtml(t.target) + ')</span>') : escapeHtml(t.target); html += '<div class="target-item"><div style="flex:1;">' + display + '</div><button class="btn-del" onclick="removeTarget(' + idx + ')">&times;</button></div>'; }); document.getElementById('targetList').innerHTML = html; }
     function addPingTarget() { var val = document.getElementById('newPingTarget').value; var alias = document.getElementById('newPingAlias').value; if(val) { currentTargets.push({target: val, alias: alias}); saveGlobalTargets(); document.getElementById('newPingTarget').value = ''; document.getElementById('newPingAlias').value = ''; } }
     function removeTarget(idx) { currentTargets.splice(idx, 1); saveGlobalTargets(); }
     function saveGlobalTargets() { fetch('/api/settings/save_global_targets', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentTargets)}).then(function(){ renderTargets(); }); }
 
     function openNodeDetails(id) {
         if(!currentStatsData[id]) return; var s = currentStatsData[id]; var flag = getFlagEmoji(s.country_code);
-        var infoHtml = '<div class="info-item"><div class="info-label">节点名称 / ID</div><div class="info-value"><span class="flag">'+flag+'</span>' + (s.name||s.agent_id) + '<br><span style="font-size:12px;color:var(--text-sub)">' + s.agent_id + '</span></div></div>' +
+        var infoHtml = '<div class="info-item"><div class="info-label">节点名称 / ID</div><div class="info-value"><span class="flag">'+flag+'</span>' + (escapeHtml(s.name)||s.agent_id) + '<br><span style="font-size:12px;color:var(--text-sub)">' + s.agent_id + '</span></div></div>' +
             '<div class="info-item"><div class="info-label">操作系统</div><div class="info-value">' + (s.os||"等待接入...") + '</div></div>' +
             '<div class="info-item"><div class="info-label">IP 地址</div><div class="info-value">' + (s.ip||"-") + '</div></div>' +
             '<div class="info-item"><div class="info-label">持续运行</div><div class="info-value">' + formatUptime(s.uptime) + '</div></div>' + 
@@ -1016,8 +1068,17 @@ func runServer(port string) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	
-	store := cookie.NewStore([]byte("12345678901234567890123456789012"))
-	store.Options(sessions.Options{Path: "/", MaxAge: 3600 * 24})
+	// 安全增强: 随机生成 Session Key
+	var sessionKey []byte
+	if envKey := os.Getenv("SESSION_KEY"); envKey != "" {
+		sessionKey = []byte(envKey)
+	} else {
+		sessionKey = make([]byte, 32)
+		rand.Read(sessionKey)
+	}
+	store := cookie.NewStore(sessionKey)
+	// 安全增强: Cookie 属性设置
+	store.Options(sessions.Options{Path: "/", MaxAge: 3600 * 24, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	r.Use(sessions.Sessions("mysession", store))
 
 	r.GET("/api/download", func(c *gin.Context) {
@@ -1062,9 +1123,14 @@ func runServer(port string) {
 	r.POST("/login", func(c *gin.Context) {
 		u,p:=c.PostForm("username"),c.PostForm("password")
 		var user User
-		if db.Where("username=? AND password=?",u,hashPwd(p)).First(&user).Error==nil {
-			s:=sessions.Default(c); s.Set("user",u); s.Save(); c.Redirect(302,"/")
-		} else { c.Redirect(302,"/login") }
+		// 安全增强: 校验加盐哈希
+		if db.Where("username=?",u).First(&user).Error==nil {
+			if checkPwd(p, user.Password) {
+				s:=sessions.Default(c); s.Set("user",u); s.Save(); c.Redirect(302,"/")
+				return
+			}
+		} 
+		c.Redirect(302,"/login")
 	})
 	r.GET("/logout", func(c *gin.Context) { s:=sessions.Default(c);s.Clear();s.Save();c.Redirect(302,"/") })
 
@@ -1072,7 +1138,11 @@ func runServer(port string) {
 	{
 		api.POST("/report", func(c *gin.Context) {
 			globalConfig.RLock(); t:=globalConfig.Token; targets:=globalConfig.PingTargets; globalConfig.RUnlock()
-			if c.Query("token")!=t { c.AbortWithStatus(401); return }
+			// 安全增强: 优先从 Header 获取 Token
+			clientToken := c.GetHeader("Authorization")
+			if clientToken == "" { clientToken = c.Query("token") } // 兼容旧方式
+			
+			if clientToken != t { c.AbortWithStatus(401); return }
 			
 			var s SystemStatus
 			if err:=c.ShouldBindJSON(&s); err==nil {
@@ -1435,13 +1505,29 @@ func authMiddleware() gin.HandlerFunc {
 	}
 }
 
-func hashPwd(s string) string { h:=sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+// 安全增强: 加盐哈希
+func hashPwd(password string) string {
+	salt := make([]byte, 16)
+	rand.Read(salt)
+	hash := sha256.Sum256(append(salt, []byte(password)...))
+	return hex.EncodeToString(salt) + "$" + hex.EncodeToString(hash[:])
+}
+
+// 安全增强: 校验密码
+func checkPwd(password, stored string) bool {
+	parts := strings.Split(stored, "$")
+	if len(parts) != 2 { return false }
+	salt, _ := hex.DecodeString(parts[0])
+	expectedHash, _ := hex.DecodeString(parts[1])
+	actualHash := sha256.Sum256(append(salt, []byte(password)...))
+	return subtle.ConstantTimeCompare(expectedHash, actualHash[:]) == 1
+}
 
 // ================= Agent =================
 
 func runAgent(server, token, id string) {
 	fmt.Printf("Agent -> %s (ID:%s)\n", server, id)
-	url := fmt.Sprintf("%s/api/report?token=%s", server, token)
+	url := fmt.Sprintf("%s/api/report", server) // 移除 URL 参数
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	hostInfo, _ := host.Info()
@@ -1530,7 +1616,12 @@ func runAgent(server, token, id string) {
 		}
 
 		d, _ := json.Marshal(s)
-		resp, err := client.Post(url, "application/json", bytes.NewBuffer(d))
+		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(d))
+		req.Header.Set("Content-Type", "application/json")
+		// 安全增强: Header 传输 Token
+		req.Header.Set("Authorization", token)
+		
+		resp, err := client.Do(req)
 
 		if err == nil {
 			body, _ := ioutil.ReadAll(resp.Body)
