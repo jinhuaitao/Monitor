@@ -1,0 +1,36 @@
+name: Build Go Monitor
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 1. 检出代码
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 2. 设置 Go 环境
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22' # 根据你的实际 go.mod 版本调整
+
+    # 3. 下载依赖并编译 monitor 程序
+    - name: Build binary
+      working-directory: ./Monitor-main/monitor
+      run: |
+        go mod tidy
+        go build -v -o monitor-app main.go
+
+    # 4. 保存编译好的二进制文件（可在 GitHub Actions 页面下载）
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: monitor-binary
+        path: ./Monitor-main/monitor/monitor-app
