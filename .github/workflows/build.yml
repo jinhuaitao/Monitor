@@ -1,15 +1,18 @@
-name: Build Go Monitor
+name: Build and Release Monitor
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    # 也可以通过打 Tag 触发（推荐）：
+    # tags:
+    #   - 'v*'
 
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: write # 赋予发布 Release 的权限
+
     steps:
     # 1. 检出代码
     - name: Checkout code
@@ -21,13 +24,9 @@ jobs:
       with:
         go-version: '1.22'
 
-    # 3. 自动寻找 main.go 所在目录并编译，避免路径报错
+    # 3. 自动寻找 main.go 所在目录并编译
     - name: Find and Build
       run: |
-        echo "=== 打印当前目录结构，方便调试 ==="
-        pwd
-        ls -la
-        
         echo "=== 寻找 main.go 的精确路径 ==="
         MAIN_PATH=$(find . -name "main.go" -print -quit)
         
@@ -37,22 +36,27 @@ jobs:
         fi
         
         echo "找到 main.go 位于: $MAIN_PATH"
-        
-        # 获取 main.go 所在的文件夹目录
         TARGET_DIR=$(dirname "$MAIN_PATH")
-        echo "进入目录: $TARGET_DIR 并开始编译..."
         
         cd "$TARGET_DIR"
         go mod tidy
+        # 可以根据需要交叉编译不同平台的版本，这里默认编译当前 Linux x86_64
         go build -v -o monitor-app main.go
         
-        # 将编译好的文件移动到临时统一存放目录
+        # 移动到根目录准备打包
         mkdir -p ../../output
         mv monitor-app ../../output/monitor-app
 
-    # 4. 保存编译好的二进制文件到 Artifacts
-    - name: Upload compiled binary
-      uses: actions/upload-artifact@v4
+    # 4. 自动创建 Release 并上传二进制文件
+    - name: Release to GitHub
+      uses: softprops/action-gh-release@v2
       with:
-        name: monitor-binary
-        path: output/monitor-app
+        files: output/monitor-app
+        # 如果你想用固定的标签名覆盖发布，或者每次用时间戳
+        tag_name: v1.0.${{ github.run_number }}
+        name: "Monitor Service v1.0.${{ github.run_number }}"
+        body: "自动编译发布的 Monitor 服务二进制文件。"
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
