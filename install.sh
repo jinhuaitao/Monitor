@@ -2,7 +2,7 @@
 
 # =================配置区域=================
 # 下载地址
-DOWNLOAD_URL="https://github.com/jinhuaitao/Monitor/releases/download/V1.0.0/monitor"
+DOWNLOAD_URL="https://github.com/jinhuaitao/Monitor/releases/download/Latest/monitor"
 # 服务名称
 SERVICE_NAME="monitor_server"
 # 本地保存的文件名
