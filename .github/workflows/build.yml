@@ -17,11 +17,12 @@ jobs:
 
     # 2. 设置 Go 环境
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: setup-go@v5
       with:
-        go-version: '1.22' # 根据你的实际 go.mod 版本调整
+        go-version: '1.22'
 
-    # 3. 下载依赖并编译 monitor 程序
+    # 3. 编译 Go 监控程序
+    # 注意：根据你解压后的实际目录层级调整 working-directory（如果 Monitor-main 是根目录）
     - name: Build binary
       working-directory: ./Monitor-main/monitor
       run: |
