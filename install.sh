@@ -1,8 +1,8 @@
 #!/bin/sh
 
 # =================配置区域=================
-# 下载地址
-DOWNLOAD_URL="https://github.com/jinhuaitao/Monitor/releases/download/Latest/monitor"
+# 基础下载地址前缀（使用 releases/latest 自动获取最新版本）
+GITHUB_REPO="jinhuaitao/Monitor"
 # 服务名称
 SERVICE_NAME="monitor_server"
 # 本地保存的文件名
@@ -38,6 +38,26 @@ check_os() {
     fi
 }
 
+# --- 架构检测与下载地址生成 ---
+get_download_url() {
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64|amd64)
+            ASSET_NAME="monitor-linux-amd64"
+            ;;
+        aarch64|arm64)
+            ASSET_NAME="monitor-linux-arm64"
+            ;;
+        *)
+            echo -e "${RED}错误: 不支持的 CPU 架构: $ARCH${NC}"
+            exit 1
+            ;;
+    esac
+    
+    # 拼接 GitHub Latest 稳定下载直链
+    echo "https://github.com/${GITHUB_REPO}/releases/latest/download/${ASSET_NAME}"
+}
+
 # --- 辅助函数：检测服务管理器 ---
 # 返回 1 为 Systemd, 2 为 OpenRC, 0 为未知
 get_init_system() {
@@ -66,13 +86,17 @@ install_deps() {
 do_install() {
     install_deps
     
+    # 动态获取架构对应的下载链接
+    DOWNLOAD_URL=$(get_download_url)
+    echo -e "${BLUE}检测到架构，下载地址: $DOWNLOAD_URL${NC}"
+
     # 停止旧服务
     do_stop >/dev/null 2>&1
 
     echo -e "${YELLOW}正在下载 monitor...${NC}"
     curl -L -o "$BIN_PATH" "$DOWNLOAD_URL"
     if [ $? -ne 0 ]; then
-        echo -e "${RED}下载失败，请检查网络。${NC}"
+        echo -e "${RED}下载失败，请检查网络或确认该架构的资源是否存在。${NC}"
         exit 1
     fi
     chmod +x "$BIN_PATH"
