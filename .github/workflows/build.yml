@@ -4,17 +4,11 @@ on:
   push:
     branches: [ main, master ]
     paths:
-      - 'main.go'
-      - 'ui.go'
-      - 'update.go'
-      - 'version.go'
+      - '**/*.go'
   pull_request:
     branches: [ main, master ]
     paths:
-      - 'main.go'
-      - 'ui.go'
-      - 'update.go'
-      - 'version.go'
+      - '**/*.go'
   workflow_dispatch:
 
 permissions:
