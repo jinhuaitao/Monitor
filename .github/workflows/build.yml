@@ -20,18 +20,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # x86_64：runner 自带的 gcc，原生编译
+          # x86_64：runner 自带的 gcc，原生编译[cite: 1]
           - goarch: amd64
             use_zig: false
-          # ARM64：用 zig 当 C 交叉编译器（不再依赖 apt 的 gcc-aarch64-linux-gnu）
+          # ARM64：用 zig 当 C 交叉编译器（不再依赖 apt 的 gcc-aarch64-linux-gnu）[cite: 1]
           - goarch: arm64
             use_zig: true
 
     env:
       GOOS: linux
       GOARCH: ${{ matrix.goarch }}
-      CGO_ENABLED: '1'   # gorm.io/driver/sqlite (mattn/go-sqlite3) 必须开 CGO
-      CC: ${{ matrix.use_zig && 'zig cc -target aarch64-linux-gnu' || 'gcc' }}
+      CGO_ENABLED: '1'   # gorm.io/driver/sqlite (mattn/go-sqlite3) 必须开 CGO[cite: 1]
+      CC: ${{ matrix.use_zig && 'zig cc -target aarch64-linux-gnu' || 'gcc' }}[cite: 1]
 
     steps:
       - name: Checkout
@@ -40,13 +40,13 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # gin v1.12 要求 Go >= 1.25
+          # gin v1.12 要求 Go >= 1.25[cite: 1]
           go-version: '1.27'
           cache: true
 
-      # sqlite 驱动是 C 实现，交叉编译 arm64 必须有一个能产出 aarch64 代码的 C 编译器。
-      # zig 自带各 target 的 libc/头文件，装完即可当交叉编译器用，
-      # 不受 apt 源波动影响（原 apt install gcc-aarch64-linux-gnu 方案易在 update 阶段失败）。
+      # sqlite 驱动是 C 实现，交叉编译 arm64 必须有一个能产出 aarch64 代码的 C 编译器。[cite: 1]
+      # zig 自带各 target 的 libc/头文件，装完即可当交叉编译器用，[cite: 1]
+      # 不受 apt 源波动影响（原 apt install gcc-aarch64-linux-gnu 方案易在 update 阶段失败）。[cite: 1]
       - name: Setup zig (cross C compiler)
         if: matrix.use_zig
         run: |
@@ -96,3 +96,4 @@ jobs:
           files: |
             dist/monitor-linux-${{ matrix.goarch }}
             dist/monitor-linux-${{ matrix.goarch }}.sha256
+          generate_release_notes: true
