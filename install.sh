@@ -1,8 +1,11 @@
 #!/bin/sh
 
 # =================配置区域=================
-# 基础下载地址前缀（使用 releases/latest 自动获取最新版本）
+# GitHub 仓库（owner/repo）
 GITHUB_REPO="jinhuaitao/Monitor"
+# 下载加速镜像前缀，国内网络可填 https://ghfast.top/ ，留空为直连
+# 例如: MIRROR="https://ghfast.top/"
+MIRROR=""
 # 服务名称
 SERVICE_NAME="monitor_server"
 # 本地保存的文件名
@@ -24,7 +27,7 @@ NC='\033[0m'
 
 # 检查 Root 权限
 if [ "$(id -u)" != "0" ]; then
-    echo -e "${RED}错误: 请使用 sudo 或 root 权限运行此脚本${NC}"
+    printf '%b\n' "${RED}错误: 请使用 sudo 或 root 权限运行此脚本${NC}"
     exit 1
 fi
 
@@ -39,41 +42,71 @@ check_os() {
 }
 
 # --- 架构检测与下载地址生成 ---
-get_download_url() {
+get_asset_name() {
     ARCH=$(uname -m)
     case "$ARCH" in
         x86_64|amd64)
-            ASSET_NAME="monitor-linux-amd64"
+            echo "monitor-linux-amd64"
             ;;
         aarch64|arm64)
-            ASSET_NAME="monitor-linux-arm64"
+            echo "monitor-linux-arm64"
             ;;
         *)
-            echo -e "${RED}错误: 不支持的 CPU 架构: $ARCH${NC}"
+            printf '%b\n' "${RED}错误: 不支持的 CPU 架构: $ARCH${NC}" >&2
             exit 1
             ;;
     esac
-    
-    # 拼接 GitHub Latest 稳定下载直链
-    echo "https://github.com/${GITHUB_REPO}/releases/latest/download/${ASSET_NAME}"
+}
+
+# 拼接下载直链（自动带上镜像前缀）
+get_download_url() {
+    echo "${MIRROR}https://github.com/${GITHUB_REPO}/releases/latest/download/$1"
 }
 
 # --- 辅助函数：检测服务管理器 ---
 # 返回 1 为 Systemd, 2 为 OpenRC, 0 为未知
+#
+# 注意：/run/systemd/system 是【目录】而非文件，
+# 早期版本用 -f 判断会导致 CentOS / RHEL / Rocky 等被误判为"无法识别"，
+# 从而只下载二进制却不注册服务。
 get_init_system() {
-    if [ -f /run/systemd/system ] || [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+    # 1. systemd 正在作为 init 运行（最可靠的判据）
+    if [ -d /run/systemd/system ]; then
         return 1
-    elif [ -f /sbin/openrc-run ] || [ "$OS" = "alpine" ]; then
+    fi
+    # 2. OpenRC 正在运行
+    if [ -f /sbin/openrc-run ] || command -v rc-service >/dev/null 2>&1; then
         return 2
+    fi
+    # 3. 按发行版兜底
+    case "$OS" in
+        alpine) return 2 ;;
+        debian|ubuntu|centos|rhel|rocky|almalinux|fedora|arch|opensuse*) return 1 ;;
+    esac
+    # 4. 最后看命令是否存在
+    if command -v systemctl >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+# --- 辅助函数：计算文件 SHA256（兼容 busybox / coreutils / macOS） ---
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
     else
-        return 0
+        echo ""
     fi
 }
 
 # --- 辅助函数：安装依赖 ---
 install_deps() {
     if ! command -v curl >/dev/null 2>&1; then
-        echo -e "${YELLOW}正在安装 curl...${NC}"
+        printf '%b\n' "${YELLOW}正在安装 curl...${NC}"
         if [ "$OS" = "alpine" ]; then
             apk add --no-cache curl
         elif [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
@@ -82,32 +115,88 @@ install_deps() {
     fi
 }
 
-# --- 功能 1: 安装 ---
+# --- 辅助函数：下载并校验 ---
+# 关键点：必须带 -f，否则 HTTP 404 时 curl 仍返回 0，
+# 会把 "Not Found" 当成二进制装进去，表现为服务永远起不来。
+download_binary() {
+    ASSET_NAME="$1"
+    URL=$(get_download_url "$ASSET_NAME")
+    printf '%b\n' "${BLUE}下载地址: $URL${NC}"
+
+    if ! curl -fL --progress-bar --connect-timeout 20 --retry 2 -o "$BIN_PATH" "$URL"; then
+        printf '%b\n' "${RED}下载失败：请检查网络，或确认该架构的资源是否存在。${NC}"
+        printf '%b\n' "${YELLOW}国内网络可在脚本顶部设置 MIRROR=\"https://ghfast.top/\" 后重试。${NC}"
+        rm -f "$BIN_PATH"
+        return 1
+    fi
+
+    # 校验完整性（Release 中带有 .sha256 资源）
+    EXPECT=$(curl -fsSL --connect-timeout 20 "$(get_download_url "${ASSET_NAME}.sha256")" 2>/dev/null | awk '{print $1}')
+    if [ -n "$EXPECT" ]; then
+        ACTUAL=$(sha256_of "$BIN_PATH")
+        if [ -n "$ACTUAL" ] && [ "$EXPECT" != "$ACTUAL" ]; then
+            printf '%b\n' "${RED}SHA256 校验失败：文件不完整或被篡改，已放弃安装。${NC}"
+            rm -f "$BIN_PATH"
+            return 1
+        fi
+        printf '%b\n' "${GREEN}SHA256 校验通过。${NC}"
+    else
+        printf '%b\n' "${YELLOW}未获取到校验文件，跳过完整性校验。${NC}"
+    fi
+
+    chmod +x "$BIN_PATH"
+    return 0
+}
+
+# --- 辅助函数：等待旧进程完全退出（避免覆盖正在运行的二进制） ---
+wait_stopped() {
+    if ! command -v pgrep >/dev/null 2>&1; then
+        sleep 1
+        return 0
+    fi
+    i=0
+    while [ "$i" -lt 10 ]; do
+        if ! pgrep -f "$BIN_PATH" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# --- 功能 1: 安装 / 更新 ---
 do_install() {
     install_deps
-    
-    # 动态获取架构对应的下载链接
-    DOWNLOAD_URL=$(get_download_url)
-    echo -e "${BLUE}检测到架构，下载地址: $DOWNLOAD_URL${NC}"
 
     # 停止旧服务
     do_stop >/dev/null 2>&1
-
-    echo -e "${YELLOW}正在下载 monitor...${NC}"
-    curl -L -o "$BIN_PATH" "$DOWNLOAD_URL"
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}下载失败，请检查网络或确认该架构的资源是否存在。${NC}"
-        exit 1
+    if ! wait_stopped; then
+        printf '%b\n' "${YELLOW}警告: 旧进程似乎仍在运行，将强制结束。${NC}"
+        pkill -f "$BIN_PATH" 2>/dev/null
+        sleep 2
     fi
-    chmod +x "$BIN_PATH"
-    echo -e "${GREEN}下载并授权成功。${NC}"
+
+    # 备份旧版本，便于失败回滚
+    if [ -f "$BIN_PATH" ]; then
+        cp -f "$BIN_PATH" "$BIN_PATH.bak" 2>/dev/null || true
+    fi
+
+    if ! download_binary "$(get_asset_name)"; then
+        if [ -f "$BIN_PATH.bak" ]; then
+            mv -f "$BIN_PATH.bak" "$BIN_PATH"
+            printf '%b\n' "${YELLOW}已回滚到旧版本。${NC}"
+        fi
+        return 1
+    fi
+    printf '%b\n' "${GREEN}下载并授权成功。${NC}"
 
     get_init_system
     INIT_SYS=$?
 
     if [ $INIT_SYS -eq 1 ]; then
-        # Systemd 安装
-        echo -e "${YELLOW}配置 Systemd 服务...${NC}"
+        # ================= Systemd =================
+        printf '%b\n' "${YELLOW}配置 Systemd 服务...${NC}"
         cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=Monitor Server Service
@@ -125,13 +214,14 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-        systemctl enable "$SERVICE_NAME"
-        systemctl start "$SERVICE_NAME"
-        echo -e "${GREEN}安装完成！服务已启动 (Systemd)。${NC}"
+        systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+        # 用 restart 而非 start：服务已在运行时也能正确加载新二进制
+        systemctl restart "$SERVICE_NAME"
+        printf '%b\n' "${GREEN}安装完成！服务已启动 (Systemd)。${NC}"
 
     elif [ $INIT_SYS -eq 2 ]; then
-        # OpenRC 安装
-        echo -e "${YELLOW}配置 OpenRC 服务...${NC}"
+        # ================= OpenRC (Alpine) =================
+        printf '%b\n' "${YELLOW}配置 OpenRC 服务...${NC}"
         INIT_FILE="/etc/init.d/${SERVICE_NAME}"
         cat > "$INIT_FILE" <<EOF
 #!/sbin/openrc-run
@@ -150,74 +240,86 @@ depend() {
 }
 EOF
         chmod +x "$INIT_FILE"
-        rc-update add "$SERVICE_NAME" default
+        rc-update add "$SERVICE_NAME" default >/dev/null 2>&1
+        # 清理残留 pidfile，否则会出现 "no matching processes found" 与假启动
+        rm -f "/run/${SERVICE_NAME}.pid"
         rc-service "$SERVICE_NAME" start
-        echo -e "${GREEN}安装完成！服务已启动 (OpenRC)。${NC}"
+        printf '%b\n' "${GREEN}安装完成！服务已启动 (OpenRC)。${NC}"
     else
-        echo -e "${RED}无法识别服务管理器，仅下载了文件。${NC}"
+        printf '%b\n' "${RED}无法识别服务管理器，仅下载了文件。${NC}"
+        printf '%b\n' "${YELLOW}可手动运行: ${BIN_PATH} ${APP_ARGS}${NC}"
+        rm -f "$BIN_PATH.bak"
+        return 1
     fi
+
+    # 安装成功后清理备份
+    rm -f "$BIN_PATH.bak"
+
+    # 展示服务状态与当前版本，便于确认更新是否真正生效
+    do_status
 }
 
 # --- 功能 2: 卸载 ---
 do_uninstall() {
-    echo -e "${YELLOW}正在卸载...${NC}"
+    printf '%b\n' "${YELLOW}正在卸载...${NC}"
     do_stop
-    
+
     get_init_system
     INIT_SYS=$?
 
     if [ $INIT_SYS -eq 1 ] && [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
-        systemctl disable "$SERVICE_NAME"
+        systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
         rm "/etc/systemd/system/${SERVICE_NAME}.service"
         systemctl daemon-reload
-        echo -e "已移除 Systemd 服务配置。"
+        printf '%b\n' "已移除 Systemd 服务配置。"
     elif [ $INIT_SYS -eq 2 ] && [ -f "/etc/init.d/${SERVICE_NAME}" ]; then
-        rc-update del "$SERVICE_NAME" default
+        rc-update del "$SERVICE_NAME" default >/dev/null 2>&1
         rm "/etc/init.d/${SERVICE_NAME}"
-        echo -e "已移除 OpenRC 服务配置。"
+        rm -f "/run/${SERVICE_NAME}.pid"
+        printf '%b\n' "已移除 OpenRC 服务配置。"
     fi
 
     if [ -f "$BIN_PATH" ]; then
         rm "$BIN_PATH"
-        echo -e "已删除文件: $BIN_PATH"
+        printf '%b\n' "已删除文件: $BIN_PATH"
     fi
-    echo -e "${GREEN}卸载完成。${NC}"
+    printf '%b\n' "${GREEN}卸载完成。${NC}"
 }
 
 # --- 功能 3: 启动 ---
 do_start() {
-    echo -e "${YELLOW}正在启动服务...${NC}"
+    printf '%b\n' "${YELLOW}正在启动服务...${NC}"
     get_init_system
     INIT_SYS=$?
-    
+
     if [ $INIT_SYS -eq 1 ]; then
         systemctl start "$SERVICE_NAME"
     elif [ $INIT_SYS -eq 2 ]; then
         rc-service "$SERVICE_NAME" start
     else
-        echo -e "${RED}未知的系统类型，无法启动。${NC}"
+        printf '%b\n' "${RED}未知的系统类型，无法启动。${NC}"
         return
     fi
-    echo -e "${GREEN}操作完成。${NC}"
+    printf '%b\n' "${GREEN}操作完成。${NC}"
 }
 
 # --- 功能 4: 停止 ---
 do_stop() {
-    echo -e "${YELLOW}正在停止服务...${NC}"
+    printf '%b\n' "${YELLOW}正在停止服务...${NC}"
     get_init_system
     INIT_SYS=$?
-    
+
     if [ $INIT_SYS -eq 1 ]; then
         systemctl stop "$SERVICE_NAME"
     elif [ $INIT_SYS -eq 2 ]; then
         rc-service "$SERVICE_NAME" stop
     fi
-    echo -e "${GREEN}操作完成。${NC}"
+    printf '%b\n' "${GREEN}操作完成。${NC}"
 }
 
 # --- 功能 5: 重启 ---
 do_restart() {
-    echo -e "${YELLOW}正在重启服务...${NC}"
+    printf '%b\n' "${YELLOW}正在重启服务...${NC}"
     do_stop
     sleep 1
     do_start
@@ -225,34 +327,46 @@ do_restart() {
 
 # --- 功能 6: 状态 ---
 do_status() {
-    echo -e "${BLUE}>>> 服务运行状态:${NC}"
+    printf '%b\n' "${BLUE}>>> 服务运行状态:${NC}"
     get_init_system
     INIT_SYS=$?
-    
+
     if [ $INIT_SYS -eq 1 ]; then
         systemctl status "$SERVICE_NAME" --no-pager
     elif [ $INIT_SYS -eq 2 ]; then
         rc-service "$SERVICE_NAME" status
+    else
+        printf '%b\n' "${YELLOW}未识别的服务管理器，请检查进程是否存活:${NC}"
+        pgrep -f "$BIN_PATH" >/dev/null 2>&1 && echo "进程存活" || echo "进程未运行"
+    fi
+
+    if [ -f "$BIN_PATH" ]; then
+        if command -v timeout >/dev/null 2>&1; then
+            VER=$(timeout 5 "$BIN_PATH" -mode version 2>/dev/null | head -n 1)
+        else
+            VER=$("$BIN_PATH" -mode version 2>/dev/null | head -n 1)
+        fi
+        [ -n "$VER" ] && printf '%b\n' "${GREEN}${VER}${NC}"
     fi
 }
 
 # --- 菜单界面 ---
 check_os
 clear
-echo -e "${BLUE}=====================================${NC}"
-echo -e "   Monitor Server 管理脚本"
-echo -e "   系统: $OS | 路径: $CURRENT_DIR"
-echo -e "${BLUE}=====================================${NC}"
-echo -e "1. 安装 / 更新 (Install/Update)"
-echo -e "2. 卸载 (Uninstall)"
-echo -e "-------------------------------------"
-echo -e "3. 启动服务 (Start)"
-echo -e "4. 停止服务 (Stop)"
-echo -e "5. 重启服务 (Restart)"
-echo -e "6. 查看状态 (Status)"
-echo -e "-------------------------------------"
-echo -e "0. 退出 (Exit)"
-echo -e "${BLUE}=====================================${NC}"
+printf '%b\n' "${BLUE}=====================================${NC}"
+printf '%b\n' "   Monitor Server 管理脚本"
+printf '%b\n' "   系统: $OS | 路径: $CURRENT_DIR"
+printf '%b\n' "${BLUE}=====================================${NC}"
+printf '%b\n' "1. 安装 / 更新 (Install/Update)"
+printf '%b\n' "2. 卸载 (Uninstall)"
+printf '%b\n' "-------------------------------------"
+printf '%b\n' "3. 启动服务 (Start)"
+printf '%b\n' "4. 停止服务 (Stop)"
+printf '%b\n' "5. 重启服务 (Restart)"
+printf '%b\n' "6. 查看状态 (Status)"
+printf '%b\n' "-------------------------------------"
+printf '%b\n' "0. 退出 (Exit)"
+printf '%b\n' "${BLUE}=====================================${NC}"
 
 printf "请输入数字 [0-6]: "
 read choice
@@ -265,5 +379,5 @@ case "$choice" in
     5) do_restart ;;
     6) do_status ;;
     0) exit 0 ;;
-    *) echo -e "${RED}无效输入，退出。${NC}"; exit 1 ;;
+    *) printf '%b\n' "${RED}无效输入，退出。${NC}"; exit 1 ;;
 esac
