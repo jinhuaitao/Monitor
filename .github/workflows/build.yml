@@ -162,6 +162,8 @@ jobs:
           prerelease: false
           files: |
             dist-all/monitor-linux-amd64/monitor-linux-amd64
+            dist-all/monitor-linux-amd64/monitor-linux-amd64.sha256
             dist-all/monitor-linux-arm64/monitor-linux-arm64
+            dist-all/monitor-linux-arm64/monitor-linux-arm64.sha256
             dist-all/VERSION
             dist-all/build-info.txt
