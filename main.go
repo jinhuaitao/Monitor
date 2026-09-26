@@ -26,12 +26,12 @@ import (
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite" // 纯 Go SQLite 驱动：无需 CGO，可静态编译
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
 	gonet "github.com/shirou/gopsutil/v3/net"
-	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -480,7 +480,8 @@ func runServer(port string) {
 			db.Where("agent_id = ? AND type = 'disk'", id).Order("created_at desc").Limit(50).Find(&disks)
 			
 			fmtData := func(list []MonitorHistory) []gin.H {
-				var res []gin.H
+				// 初始化空切片，避免无数据时序列化成 null
+				res := make([]gin.H, 0, len(list))
 				for i := len(list)-1; i >= 0; i-- {
 					res = append(res, gin.H{"time": list[i].CreatedAt, "val": list[i].Value, "target": list[i].Target})
 				}
