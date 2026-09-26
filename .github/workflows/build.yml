@@ -44,17 +44,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - goarch: amd64
-            use_zig: false
-          - goarch: arm64
-            use_zig: true
+        goarch: [ amd64, arm64 ]
 
     env:
       GOOS: linux
       GOARCH: ${{ matrix.goarch }}
-      CGO_ENABLED: '1'
-      CC: "${{ matrix.use_zig && 'zig cc -target aarch64-linux-gnu' || 'gcc' }}"
+      # 关键：依赖链已全部为纯 Go（SQLite 改用 glebarez/sqlite），
+      # 关闭 CGO 即可产出【静态二进制】，同时兼容 Alpine(musl) 与 Debian/CentOS(glibc)。
+      # 早前 CGO_ENABLED=1 用 Ubuntu gcc 编出的是 glibc 动态链接二进制，
+      # 在 Alpine 上会因缺少 /lib64/ld-linux-x86-64.so.2 直接 crashed。
+      CGO_ENABLED: '0'
 
     steps:
       - name: Checkout
@@ -66,26 +65,13 @@ jobs:
           go-version: '1.27'
           cache: true
 
-      - name: Setup zig (cross C compiler)
-        if: matrix.use_zig
-        run: |
-          set -e
-          ZIG_VERSION=0.15.2
-          mkdir -p "$HOME/.zig"
-          curl -fsSL -o /tmp/zig.tar.xz \
-            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          tar -C "$HOME/.zig" --strip-components=1 -xf /tmp/zig.tar.xz
-          echo "$HOME/.zig" >> "$GITHUB_PATH"
-          "$HOME/.zig/zig" version
-
       - name: Download dependencies
         run: go mod download
 
       - name: Show toolchain
         run: |
           go version
-          go env GOOS GOARCH CGO_ENABLED CC
-          command -v "${CC%% *}" || true
+          go env GOOS GOARCH CGO_ENABLED
 
       - name: Build
         env:
@@ -99,7 +85,21 @@ jobs:
             -ldflags "-s -w -X main.BuildVersion=${VERSION} -X main.BuildCommit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
             -o "dist/monitor-linux-${{ matrix.goarch }}" .
           file "dist/monitor-linux-${{ matrix.goarch }}"
-          ./dist/monitor-linux-${{ matrix.goarch }} -mode version || true
+
+      # 防回归：一旦有人重新打开 CGO，Alpine 用户会立刻遇到启动崩溃
+      - name: Verify static linking
+        run: |
+          set -e
+          BIN="dist/monitor-linux-${{ matrix.goarch }}"
+          if readelf -l "$BIN" | grep -q "INTERP"; then
+            echo "::error file=$BIN::$BIN 是动态链接二进制，在 Alpine(musl) 上无法启动。请保持 CGO_ENABLED=0。"
+            exit 1
+          fi
+          if strings -a "$BIN" | grep -q "^GLIBC_"; then
+            echo "::error file=$BIN::$BIN 仍引用 GLIBC 符号，构建环境可能误开了 CGO。"
+            exit 1
+          fi
+          echo "✓ 静态链接校验通过：$BIN 可运行于 musl 与 glibc 发行版"
 
       - name: Checksum
         run: |
@@ -157,6 +157,8 @@ jobs:
             版本号：`${{ needs.version.outputs.version }}`
             提交：`${{ needs.version.outputs.commit }}`
             构建时间：`${{ needs.version.outputs.build_time }}`
+
+            本版本为**静态编译**（CGO_ENABLED=0），Alpine(musl) 与 Debian/CentOS(glibc) 通用。
 
             可在面板「系统管理 → 版本更新」中一键升级面板与客户端。
           prerelease: false
