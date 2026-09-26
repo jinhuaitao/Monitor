@@ -82,15 +82,27 @@ jobs:
             dist/monitor-linux-${{ matrix.goarch }}
             dist/monitor-linux-${{ matrix.goarch }}.sha256
 
-      # 每次推送到 main/master 都会自动发布/更新到名为 "latest" 的 Release 中（正式版）
+  # 新增一个独立的发布 Job，等待 build 全部完成后统一打包上传，避免并发冲突
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-all
+
+      - name: Display downloaded files
+        run: ls -R dist-all
+
       - name: Publish to Release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest             # 使用固定的 tag 名
-          name: "Latest Release"       # Release 显示的标题
+          tag_name: latest
+          name: "Latest Release"
           body: "自动构建的最新版本（随每次 main 分支提交更新）"
-          prerelease: false            # 设置为正式发布版本
+          prerelease: false
           files: |
-            dist/monitor-linux-${{ matrix.goarch }}
-            dist/monitor-linux-${{ matrix.goarch }}.sha256
+            dist-all/monitor-linux-amd64/monitor-linux-amd64
+            dist-all/monitor-linux-arm64/monitor-linux-arm64
