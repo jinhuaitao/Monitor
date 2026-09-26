@@ -29,7 +29,6 @@ jobs:
       GOOS: linux
       GOARCH: ${{ matrix.goarch }}
       CGO_ENABLED: '1'
-      # 修复了第34行附近的表达式格式，用单引号包裹整个表达式避免 YAML 语法解析错误
       CC: "${{ matrix.use_zig && 'zig cc -target aarch64-linux-gnu' || 'gcc' }}"
 
     steps:
