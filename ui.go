@@ -163,63 +163,142 @@ body{
 .ov-foot{font-size:11.5px;color:var(--text-mute);margin-top:6px}
 
 /* ---------- 节点 ---------- */
-.node-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:15px}
+.node-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:16px}
 .node-grid.list-view{grid-template-columns:1fr}
+
+/* 卡片本体：玻璃底 + 内高光 + 三层阴影，hover 时抬升并透出主色描边 */
 .node-card{
-  position:relative;background:var(--glass-bg);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-  border:1px solid var(--glass-border);border-radius:var(--r-lg);padding:var(--row-padding) 16px;
-  box-shadow:var(--glass-shadow);transition:transform .25s cubic-bezier(.2,.7,.3,1),box-shadow .25s,padding .2s;
+  position:relative;isolation:isolate;
+  background:var(--glass-bg);
+  backdrop-filter:blur(16px) saturate(170%);-webkit-backdrop-filter:blur(16px) saturate(170%);
+  border:1px solid var(--glass-border);border-radius:var(--r-lg);
+  padding:calc(var(--row-padding) + 3px) 17px calc(var(--row-padding) + 3px);
+  box-shadow:var(--glass-shadow), inset 0 1px 0 rgba(255,255,255,.6);
+  transition:transform .28s cubic-bezier(.2,.7,.3,1),box-shadow .28s,border-color .28s,opacity .3s;
 }
+/* 顶部状态光带：在线=绿 / 离线=红，一眼判读节点死活 */
+.node-card::before{
+  content:'';position:absolute;top:0;left:18px;right:18px;height:2px;border-radius:0 0 4px 4px;
+  background:linear-gradient(90deg,transparent,var(--success) 20%,var(--success) 80%,transparent);
+  box-shadow:0 0 14px rgba(16,185,129,.45);opacity:.9;pointer-events:none;
+  transition:background .45s,box-shadow .45s,opacity .45s;
+}
+.node-card.is-off::before{
+  background:linear-gradient(90deg,transparent,var(--danger) 20%,var(--danger) 80%,transparent);
+  box-shadow:0 0 14px rgba(239,68,68,.34);opacity:.9;
+}
+/* 鼠标跟随光晕：--mx/--my 由事件委托写入，纯装饰 */
+.node-card::after{
+  content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:0;
+  background:radial-gradient(240px circle at var(--mx,50%) var(--my,0%),rgba(99,102,241,.16),transparent 62%);
+  opacity:0;transition:opacity .3s;
+}
+.node-card:hover::after{opacity:1}
+.node-card>*{position:relative;z-index:1}
 /* 入场动画只在卡片【首次创建】时挂上，刷新时不会重放（否则每 2s 闪一次） */
-.node-card.anim-in{animation:cardIn .38s cubic-bezier(.2,.8,.3,1) both}
-@keyframes cardIn{from{opacity:0;transform:translateY(10px) scale(.99)}to{opacity:1;transform:none}}
-.node-card:hover{transform:translateY(-4px);box-shadow:var(--glass-shadow-hi)}
-.node-card.is-off{opacity:.72}
+.node-card.anim-in{animation:cardIn .42s cubic-bezier(.2,.8,.3,1) both}
+@keyframes cardIn{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
+.node-card:hover{
+  transform:translateY(-4px);border-color:rgba(99,102,241,.32);
+  box-shadow:var(--glass-shadow-hi), inset 0 1px 0 rgba(255,255,255,.72);
+}
+.node-card.is-off{opacity:.74}
+.node-card.is-off:hover{opacity:1}
 .node-card.is-off .nc-name{color:var(--text-sub)}
-.nc-top{display:flex;align-items:flex-start;gap:11px}
+[data-theme="dark"] .node-card{box-shadow:var(--glass-shadow), inset 0 1px 0 rgba(255,255,255,.06)}
+[data-theme="dark"] .node-card:hover{box-shadow:var(--glass-shadow-hi), inset 0 1px 0 rgba(255,255,255,.09)}
+
+.nc-top{display:flex;align-items:center;gap:12px}
 .nc-flag{font-size:22px;line-height:1;filter:saturate(115%)}
+/* 旗帜徽标：圆角方块承载，hover 微缩放，离线去色 */
+.node-card .nc-flag{
+  width:40px;height:40px;flex-shrink:0;border-radius:13px;
+  display:flex;align-items:center;justify-content:center;font-size:21px;
+  background:linear-gradient(155deg,var(--soft-2),var(--soft));
+  border:1px solid var(--soft-2);box-shadow:inset 0 1px 0 rgba(255,255,255,.55);
+  transition:transform .3s cubic-bezier(.2,.8,.3,1.3),border-color .3s;
+}
+[data-theme="dark"] .node-card .nc-flag{box-shadow:inset 0 1px 0 rgba(255,255,255,.07)}
+.node-card:hover .nc-flag{transform:translateY(-1px) scale(1.06);border-color:rgba(99,102,241,.35)}
+.node-card.is-off .nc-flag{filter:grayscale(.55) saturate(80%);opacity:.85}
 .nc-id{min-width:0;flex:1}
 .nc-name{
-  font-weight:700;font-size:15px;cursor:pointer;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-  transition:.2s;
+  font-weight:700;font-size:15.5px;letter-spacing:-.2px;cursor:pointer;display:block;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color .2s;
 }
+.node-card:hover .nc-name{color:var(--primary)}
 .nc-name:hover{color:var(--primary)}
-.nc-sub{font-size:11.5px;color:var(--text-mute);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'Menlo',monospace}
+.nc-sub{font-size:11.5px;color:var(--text-mute);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'Menlo',monospace;letter-spacing:-.1px}
 .nc-right{display:flex;align-items:center;gap:8px;flex-shrink:0}
 .status-pill{
-  display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:99px;font-size:11.5px;font-weight:700;letter-spacing:.2px;
+  display:inline-flex;align-items:center;gap:6px;padding:5px 11px 5px 9px;border-radius:99px;
+  font-size:11px;font-weight:700;letter-spacing:.3px;
 }
-.status-pill .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
-.status-pill.on{color:var(--success);background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.22)}
-.status-pill.on .dot{box-shadow:0 0 8px var(--success);animation:blink 2.2s ease-in-out infinite}
-.status-pill.off{color:var(--danger);background:rgba(239,68,68,.10);border:1px solid rgba(239,68,68,.2)}
+.status-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;position:relative;flex-shrink:0}
+.status-pill.on{color:var(--success);background:linear-gradient(135deg,rgba(16,185,129,.17),rgba(16,185,129,.06));border:1px solid rgba(16,185,129,.28)}
+.status-pill.on .dot{box-shadow:0 0 8px var(--success)}
+.status-pill.on .dot::after{content:'';position:absolute;inset:-4px;border-radius:50%;background:currentColor;animation:ripple 1.9s ease-out infinite}
+.status-pill.off{color:var(--danger);background:linear-gradient(135deg,rgba(239,68,68,.15),rgba(239,68,68,.05));border:1px solid rgba(239,68,68,.26)}
+@keyframes ripple{0%{transform:scale(.45);opacity:.55}100%{transform:scale(1.5);opacity:0}}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.45}}
 .icon-btn{
-  width:28px;height:28px;border-radius:9px;border:1px solid transparent;background:var(--soft);
-  color:var(--text-sub);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.2s;font-size:13px;
+  width:30px;height:30px;border-radius:10px;border:1px solid var(--soft-2);background:var(--soft);
+  color:var(--text-sub);cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:.22s;font-size:13px;line-height:1;
 }
-.icon-btn:hover{background:var(--soft-2);color:var(--primary);transform:translateY(-1px)}
+.icon-btn:hover{
+  background:linear-gradient(135deg,var(--primary),var(--primary-2));color:#fff;border-color:transparent;
+  transform:translateY(-1px);box-shadow:0 6px 14px -6px rgba(79,70,229,.7);
+}
 
-.nc-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0 12px}
-.metric{min-width:0}
-.m-head{display:flex;justify-content:space-between;align-items:baseline;gap:6px;margin-bottom:6px}
-.m-label{font-size:10.5px;font-weight:700;color:var(--text-mute);letter-spacing:.5px}
-.m-val{font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums}
-.bar{height:6px;border-radius:99px;background:var(--track);overflow:hidden}
-.bar-fill{height:100%;border-radius:99px;transition:width .7s cubic-bezier(.4,0,.2,1);min-width:2px}
-.nc-foot{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding-top:11px;border-top:1px solid var(--soft-2)}
+/* 指标磁贴：三格等宽，各自带底色与描边，数值/色点/进度条颜色随负载联动 */
+.nc-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:15px 0 14px}
+.metric{
+  min-width:0;padding:10px 11px 11px;border-radius:var(--r-sm);
+  background:var(--soft);border:1px solid var(--soft-2);
+  transition:background .25s,border-color .25s,transform .25s;
+}
+.metric:hover{background:var(--soft-2);border-color:rgba(99,102,241,.22);transform:translateY(-1px)}
+.m-head{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:8px}
+.m-label{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;color:var(--text-sub);letter-spacing:.5px}
+.m-dot{width:6px;height:6px;border-radius:2px;background:var(--text-mute);flex-shrink:0;transition:background .5s}
+.m-val{font-size:13px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.3px;transition:color .5s}
+.bar{height:5px;border-radius:99px;background:var(--track);overflow:hidden}
+.bar-fill{height:100%;border-radius:99px;transition:width .7s cubic-bezier(.4,0,.2,1),background .5s,box-shadow .5s;min-width:2px}
+
+/* 页脚：渐变细线分隔，胶囊化信息块。
+   拆成「主信息组 + 版本元信息组」，空间够时同排两端对齐，换行时也不会出现右侧悬空的孤立标签 */
+.nc-foot{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding-top:12px;position:relative}
+.nc-foot::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--soft-2) 10%,var(--soft-2) 90%,transparent)}
+.nc-foot-main{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-width:0}
 .chip{
   display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--text-sub);
-  background:var(--soft);border:1px solid transparent;border-radius:8px;padding:4px 9px;font-variant-numeric:tabular-nums;
+  background:var(--soft);border:1px solid var(--soft-2);border-radius:9px;padding:4px 9px;
+  font-variant-numeric:tabular-nums;transition:.22s;max-width:100%;
 }
-.chip b{color:var(--text-main);font-weight:700}
-.chip.spacer{margin-left:auto;background:transparent}
+.chip:hover{background:var(--soft-2);border-color:rgba(99,102,241,.25);color:var(--text-main);transform:translateY(-1px)}
+.chip b{color:var(--text-main);font-weight:700;font-family:'Menlo',monospace;font-size:11px}
+.chip.chip-upd{color:var(--primary);background:rgba(99,102,241,.12);border-color:rgba(99,102,241,.26);animation:blink 1.8s ease-in-out infinite}
+/* 版本号：去掉底色与描边，作为卡片右下角的弱化签名 */
+.chip.chip-meta{margin-left:auto;background:transparent;border-color:transparent;color:var(--text-mute);font-family:'Menlo',monospace;padding-left:3px;padding-right:3px}
+.chip.chip-meta:hover{background:var(--soft);border-color:var(--soft-2);color:var(--text-sub);transform:none}
+
+/* 列表视图：头/指标并排一行，页脚独占整行 —— 页脚信息量大，
+   挤进窄栏必然折成两三行，铺满整行后所有胶囊都能排在同一行 */
+.node-grid.list-view .node-card{
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);
+  grid-template-areas:"head metrics" "foot foot";
+  column-gap:22px;row-gap:13px;align-items:center;
+}
+.node-grid.list-view .nc-top{grid-area:head}
+.node-grid.list-view .nc-metrics{grid-area:metrics;margin:0}
+.node-grid.list-view .nc-foot{grid-area:foot;padding-top:12px}
 .empty{
   grid-column:1/-1;text-align:center;padding:64px 20px;color:var(--text-sub);
   background:var(--glass-bg);border-radius:var(--r-lg);backdrop-filter:blur(14px);border:1px dashed var(--glass-border);
 }
 .empty-ic{font-size:38px;margin-bottom:12px;opacity:.6}
-.skel{height:118px;border-radius:var(--r-lg);background:linear-gradient(90deg,var(--soft) 25%,var(--soft-2) 37%,var(--soft) 63%);background-size:400% 100%;animation:sheen 1.4s ease infinite}
+.skel{height:138px;border-radius:var(--r-lg);background:linear-gradient(90deg,var(--soft) 25%,var(--soft-2) 37%,var(--soft) 63%);background-size:400% 100%;animation:sheen 1.4s ease infinite}
 @keyframes sheen{0%{background-position:100% 50%}100%{background-position:0 50%}}
 
 /* ---------- 弹窗 ---------- */
@@ -401,6 +480,9 @@ body{
   .info-grid{grid-template-columns:1fr;gap:10px}
   .charts-row{flex-direction:column}
   .chart-box{height:170px}
+  /* 窄屏下列表视图回退为竖向堆叠，避免三栏被挤成窄条 */
+  .node-grid.list-view .node-card{grid-template-columns:1fr;grid-template-areas:"head" "metrics" "foot";row-gap:13px}
+  .node-grid.list-view .nc-metrics{margin:0}
 }
 @media (max-width:640px){
   .topbar{margin:10px auto 0;padding:0 10px}
@@ -411,8 +493,12 @@ body{
   .wrap{padding:16px 10px 50px}
   .overview{grid-template-columns:repeat(2,1fr);gap:10px}
   .ov-value{font-size:22px}
-  .node-card{padding:16px 14px}
-  .nc-metrics{gap:9px}
+  .node-card{padding:15px 13px}
+  .node-card::before{left:12px;right:12px}
+  .node-card .nc-flag{width:36px;height:36px;border-radius:12px;font-size:19px}
+  .nc-metrics{gap:8px}
+  .metric{padding:9px 9px 10px}
+  .m-val{font-size:12.5px}
   .input-text{font-size:16px}
   .modal{max-height:94vh}
   .node-row,.upd-node{flex-direction:column;align-items:stretch}
@@ -834,21 +920,45 @@ function isOnline(s){return (new Date()-new Date(s.last_update))/1000 < 25;}
 function barColor(v,warn,danger){
   if(v>=danger) return 'var(--danger)'; if(v>=warn) return 'var(--warning)'; return 'var(--primary)';
 }
-/* 指标骨架：结构只创建一次，之后只改数值，进度条才能平滑过渡 */
+/* 指标骨架：结构只创建一次，之后只改数值，进度条才能平滑过渡。
+   m-dot 是标签前的小色块，颜色跟随该项负载等级，扫一眼就能分辨哪项吃紧。 */
 function metricSkeleton(label){
-  return '<div class="metric"><div class="m-head"><span class="m-label">'+label+'</span><span class="m-val"></span></div>'+
+  return '<div class="metric"><div class="m-head">'+
+    '<span class="m-label"><i class="m-dot"></i>'+label+'</span>'+
+    '<span class="m-val"></span></div>'+
     '<div class="bar"><div class="bar-fill"></div></div></div>';
 }
-function setMetric(el,kind,val){
+/* 指标主色：文字与色点用纯色，进度条用同色系渐变，低负载偏冷、高负载转暖 */
+function metricColor(kind,v){
+  if(kind==='disk') return v>=90?'var(--danger)':'var(--violet)';
+  if(kind==='cpu') return barColor(v,70,90);
+  return barColor(v,80,92);
+}
+function metricGrad(kind,v){
+  if(kind==='disk') return v>=90?'linear-gradient(90deg,var(--danger),#fb7185)':'linear-gradient(90deg,var(--violet),#c084fc)';
+  if(kind==='cpu'){
+    if(v>=90) return 'linear-gradient(90deg,var(--danger),#fb7185)';
+    if(v>=70) return 'linear-gradient(90deg,var(--warning),#fbbf24)';
+    return 'linear-gradient(90deg,var(--info),var(--primary))';
+  }
+  if(v>=92) return 'linear-gradient(90deg,var(--danger),#fb7185)';
+  if(v>=80) return 'linear-gradient(90deg,var(--warning),#fbbf24)';
+  return 'linear-gradient(90deg,var(--success),#34d399)';
+}
+/* online=false 时（节点离线）数值与色点转为中性灰：
+   死掉的节点不该继续顶着"健康"的绿色/蓝色数字 */
+function setMetric(el,kind,val,online){
   if(!el) return;
-  var v=val||0, color;
-  if(kind==='disk') color=(v>=90?'var(--danger)':'var(--violet)');
-  else if(kind==='cpu') color=barColor(v,70,90);
-  else color=barColor(v,80,92);
+  var v=val||0, dead=(online===false);
+  var color=dead?'var(--text-mute)':metricColor(kind,v);
   var tv=el.querySelector('.m-val');
   tv.textContent=v.toFixed(0)+'%'; tv.style.color=color;
+  var dot=el.querySelector('.m-dot');
+  if(dot) dot.style.background=color;
   var fill=el.querySelector('.bar-fill');
-  fill.style.width=Math.min(100,v)+'%'; fill.style.background=color;
+  fill.style.width=Math.min(100,v)+'%';
+  fill.style.background=dead?'linear-gradient(90deg,var(--track),var(--track))':metricGrad(kind,v);
+  fill.style.boxShadow=dead?'none':('0 0 10px -2px '+color);
 }
 
 /* 卡片只创建一次，刷新时原地更新字段。
@@ -877,12 +987,17 @@ function buildCard(id){
 function footHtml(s){
   var total=(s.net_total_in||0)+(s.net_total_out||0);
   var ver=s.version?(s.version==='dev'?'dev':'v'+s.version):'';
-  return '<span class="chip">↓ <b>'+fmtBytes(s.net_in_speed)+'</b>/s</span>'+
-    '<span class="chip">↑ <b>'+fmtBytes(s.net_out_speed)+'</b>/s</span>'+
-    '<span class="chip">总 <b>'+fmtBytes(total)+'</b></span>'+
-    '<span class="chip">⏱ '+fmtUptime(s.uptime)+'</span>'+
-    pingSummary(s)+
-    (ver?'<span class="chip spacer">'+ver+'</span>':'');
+  // 面板下发了待更新版本时（仅管理员可见）在页脚亮出提示，与「版本更新」页呼应
+  var upd=s.pending_update?'<span class="chip chip-upd" title="正在更新至 v'+escapeHtml(s.pending_update)+'">⬆ 更新中</span>':'';
+  return '<span class="nc-foot-main">'+
+      '<span class="chip">↓ <b>'+fmtBytes(s.net_in_speed)+'</b>/s</span>'+
+      '<span class="chip">↑ <b>'+fmtBytes(s.net_out_speed)+'</b>/s</span>'+
+      '<span class="chip">总 <b>'+fmtBytes(total)+'</b></span>'+
+      '<span class="chip">⏱ '+fmtUptime(s.uptime)+'</span>'+
+      pingSummary(s)+
+      upd+
+    '</span>'+
+    (ver?'<span class="chip chip-meta" title="客户端版本">'+ver+'</span>':'');
 }
 function updateCard(card,s){
   var on=isOnline(s);
@@ -894,9 +1009,9 @@ function updateCard(card,s){
   pill.className='status-pill '+(on?'on':'off');
   pill.querySelector('.st-text').textContent=on?'在线':'离线';
   var m=card.querySelectorAll('.metric');
-  setMetric(m[0],'cpu',s.cpu_usage);
-  setMetric(m[1],'mem',s.mem_used_percent);
-  setMetric(m[2],'disk',s.disk_used_percent);
+  setMetric(m[0],'cpu',s.cpu_usage,on);
+  setMetric(m[1],'mem',s.mem_used_percent,on);
+  setMetric(m[2],'disk',s.disk_used_percent,on);
   var foot=card.querySelector('.nc-foot');
   var fh=footHtml(s);
   if(foot.dataset.h!==fh){ foot.innerHTML=fh; foot.dataset.h=fh; }
@@ -1376,6 +1491,18 @@ document.querySelectorAll('.modal-overlay').forEach(function(o){
   o.addEventListener('click',function(e){if(e.target===o&&o.id!=='confirmModal'&&o.id!=='tokenConfirmModal')o.classList.remove('open');});
 });
 document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeSettings();closeDetailModal();closeConfirm();closeTokenConfirm();}});
+/* 卡片光晕跟随鼠标：用事件委托挂在容器上，卡片增删都不需要重新绑定监听 */
+(function(){
+  var grid=document.getElementById('serverList');
+  if(!grid) return;
+  grid.addEventListener('mousemove',function(e){
+    var card=e.target&&e.target.closest?e.target.closest('.node-card'):null;
+    if(!card) return;
+    var r=card.getBoundingClientRect();
+    card.style.setProperty('--mx',(e.clientX-r.left)+'px');
+    card.style.setProperty('--my',(e.clientY-r.top)+'px');
+  });
+})();
 initConfigDisplay();
 initBackground();
 updateStats();
