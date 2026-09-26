@@ -181,17 +181,12 @@ body{
   box-shadow:var(--glass-shadow), inset 0 1px 0 rgba(255,255,255,.6);
   transition:transform .28s cubic-bezier(.2,.7,.3,1),box-shadow .28s,border-color .28s,opacity .3s;
 }
-/* 顶部状态光带：在线=绿 / 离线=红，一眼判读节点死活 */
-.node-card::before{
-  content:'';position:absolute;top:0;left:14px;right:14px;height:2px;border-radius:0 0 4px 4px;
-  background:linear-gradient(90deg,transparent,var(--success) 20%,var(--success) 80%,transparent);
-  box-shadow:0 0 14px rgba(16,185,129,.45);opacity:.9;pointer-events:none;
-  transition:background .45s,box-shadow .45s,opacity .45s;
-}
-.node-card.is-off::before{
-  background:linear-gradient(90deg,transparent,var(--danger) 20%,var(--danger) 80%,transparent);
-  box-shadow:0 0 14px rgba(239,68,68,.34);opacity:.9;
-}
+/* 状态表达（已移除卡片顶部的彩色光带）：
+   那条 2px 横条在密集网格里会把视线横向切断，且节点上下线时整片卡片颜色跳变很扎眼。
+   改为两级表达 ——
+   ① 右侧状态胶囊承担精确状态（在线/离线 + 呼吸圆点）；
+   ② 离线卡片用一圈淡红描边 + 降饱和，扫视整页时能直接挑出来。
+   ::before 不再占用，顶部装饰全部交给 ::after 的鼠标跟随光晕。 */
 /* 鼠标跟随光晕：--mx/--my 由事件委托写入，纯装饰 */
 .node-card::after{
   content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:0;
@@ -207,8 +202,9 @@ body{
   transform:translateY(-4px);border-color:rgba(99,102,241,.32);
   box-shadow:var(--glass-shadow-hi), inset 0 1px 0 rgba(255,255,255,.72);
 }
-.node-card.is-off{opacity:.74}
-.node-card.is-off:hover{opacity:1}
+/* 离线：淡红描边 + 整体降透明，替代原顶部红条 */
+.node-card.is-off{opacity:.74;border-color:rgba(239,68,68,.24)}
+.node-card.is-off:hover{opacity:1;border-color:rgba(239,68,68,.45)}
 .node-card.is-off .nc-name{color:var(--text-sub)}
 [data-theme="dark"] .node-card{box-shadow:var(--glass-shadow), inset 0 1px 0 rgba(255,255,255,.06)}
 [data-theme="dark"] .node-card:hover{box-shadow:var(--glass-shadow-hi), inset 0 1px 0 rgba(255,255,255,.09)}
@@ -247,9 +243,12 @@ body{
   background:rgba(99,102,241,.12);border:1px solid rgba(99,102,241,.26);
 }
 .nc-upd.on{display:inline-flex;animation:blink 1.8s ease-in-out infinite}
+/* 状态胶囊：顶部色条移除后，它是状态的主表达，故略放大并加过渡。
+   显式 line-height：胶囊高度不随字体默认行高漂移，卡片高度才稳得住 */
 .status-pill{
-  display:inline-flex;align-items:center;gap:5px;padding:3px 9px 3px 7px;border-radius:99px;
-  font-size:10px;font-weight:700;letter-spacing:.3px;
+  display:inline-flex;align-items:center;gap:5px;padding:3.5px 10px 3.5px 8px;border-radius:99px;
+  font-size:10.5px;line-height:1.3;font-weight:700;letter-spacing:.2px;
+  transition:color .3s,background .3s,border-color .3s;
 }
 .status-pill .dot{width:5px;height:5px;border-radius:50%;background:currentColor;position:relative;flex-shrink:0}
 .status-pill.on{color:var(--success);background:linear-gradient(135deg,rgba(16,185,129,.17),rgba(16,185,129,.06));border:1px solid rgba(16,185,129,.28)}
@@ -504,7 +503,6 @@ body{
   /* 卡片整体压扁后，窄屏覆盖值必须同步下调：
      否则这些「旧的大尺寸」会反过来把卡片撑得比基准值还高 */
   .node-card{padding:calc(var(--row-padding) * .6) 12px}
-  .node-card::before{left:11px;right:11px}
   .nc-metrics{gap:6px}
   .metric{padding:5px 8px 6px}
   .m-val{font-size:11.5px}
