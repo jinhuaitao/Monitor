@@ -169,8 +169,9 @@ body{
   position:relative;background:var(--glass-bg);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
   border:1px solid var(--glass-border);border-radius:var(--r-lg);padding:var(--row-padding) 16px;
   box-shadow:var(--glass-shadow);transition:transform .25s cubic-bezier(.2,.7,.3,1),box-shadow .25s,padding .2s;
-  animation:cardIn .38s cubic-bezier(.2,.8,.3,1) both;
 }
+/* 入场动画只在卡片【首次创建】时挂上，刷新时不会重放（否则每 2s 闪一次） */
+.node-card.anim-in{animation:cardIn .38s cubic-bezier(.2,.8,.3,1) both}
 @keyframes cardIn{from{opacity:0;transform:translateY(10px) scale(.99)}to{opacity:1;transform:none}}
 .node-card:hover{transform:translateY(-4px);box-shadow:var(--glass-shadow-hi)}
 .node-card.is-off{opacity:.72}
@@ -634,7 +635,11 @@ body{
               <button class="btn-primary" onclick="createNode()">生成并复制命令</button>
             </div>
           </div>
-          <div class="form-hint" style="margin-top:18px">生成的命令适用于 Systemd 与 Alpine (OpenRC)，会自动注册开机自启。</div>
+          <div class="form-hint" style="margin-top:18px">
+            生成的命令适用于 Systemd 与 Alpine (OpenRC)，会自动注册开机自启。<br>
+            命令内置 <b>uname -m</b> 探测，会<b>自动识别 amd64 / arm64</b> 并拉取对应架构的客户端，无需手动选择。
+          </div>
+          <div class="form-hint" id="installArchHint" style="margin-top:10px"></div>
         </div>
 
         <!-- 告警 -->
@@ -759,6 +764,13 @@ var isAdmin={{ .IsAdmin }}, curVersion="{{ .Version }}";
 var tgToken="{{ .TGToken }}", tgChat="{{ .TGChatID }}", whUrl="{{ .WebhookURL }}";
 var updateRepo="{{ .UpdateRepo }}", updateProxy="{{ .UpdateProxy }}", restartCmd="{{ .RestartCmd }}";
 var agentBundle="{{ .AgentBundleVersion }}";
+/* 安装命令模板，与后端 installCmdTmpl 同源；架构由目标机器 uname -m 自行探测 */
+var installTmpl={{ .InstallTmpl }};
+function buildInstallCmd(id, serverAddr, token){
+  return installTmpl.split('__SERVER__').join(serverAddr)
+                    .split('__TOKEN__').join(token)
+                    .split('__ID__').join(id);
+}
 
 var charts={}, statsData={}, currentTargets=[], latestVersion='', hasNewVersion=false;
 var viewMode=localStorage.getItem('hm_view')||'card';
@@ -822,11 +834,72 @@ function isOnline(s){return (new Date()-new Date(s.last_update))/1000 < 25;}
 function barColor(v,warn,danger){
   if(v>=danger) return 'var(--danger)'; if(v>=warn) return 'var(--warning)'; return 'var(--primary)';
 }
-function metricHtml(label,val){
-  var v=val||0, warn=label==='CPU'?70:80, danger=label==='CPU'?90:92;
-  var color=label==='DISK'?(v>=90?'var(--danger)':'var(--violet)'):barColor(v,warn,danger);
-  return '<div class="metric"><div class="m-head"><span class="m-label">'+label+'</span><span class="m-val" style="color:'+color+'">'+v.toFixed(0)+'%</span></div>'+
-    '<div class="bar"><div class="bar-fill" style="width:'+Math.min(100,v)+'%;background:'+color+'"></div></div></div>';
+/* 指标骨架：结构只创建一次，之后只改数值，进度条才能平滑过渡 */
+function metricSkeleton(label){
+  return '<div class="metric"><div class="m-head"><span class="m-label">'+label+'</span><span class="m-val"></span></div>'+
+    '<div class="bar"><div class="bar-fill"></div></div></div>';
+}
+function setMetric(el,kind,val){
+  if(!el) return;
+  var v=val||0, color;
+  if(kind==='disk') color=(v>=90?'var(--danger)':'var(--violet)');
+  else if(kind==='cpu') color=barColor(v,70,90);
+  else color=barColor(v,80,92);
+  var tv=el.querySelector('.m-val');
+  tv.textContent=v.toFixed(0)+'%'; tv.style.color=color;
+  var fill=el.querySelector('.bar-fill');
+  fill.style.width=Math.min(100,v)+'%'; fill.style.background=color;
+}
+
+/* 卡片只创建一次，刷新时原地更新字段。
+   早期实现每 2 秒重建整表 innerHTML，会让入场动画不断重放 —— 表现为整片卡片持续闪烁。 */
+var cardMap={};
+function buildCard(id){
+  var c=document.createElement('div');
+  c.className='node-card anim-in';
+  c.dataset.id=id;
+  c.innerHTML=
+    '<div class="nc-top">'+
+      '<span class="nc-flag"></span>'+
+      '<span class="nc-id"><span class="nc-name" title="查看详情"></span><span class="nc-sub"></span></span>'+
+      '<span class="nc-right">'+
+        '<span class="status-pill"><i class="dot"></i><span class="st-text"></span></span>'+
+        '<button class="icon-btn" data-act="detail" title="详情">📈</button>'+
+      '</span>'+
+    '</div>'+
+    '<div class="nc-metrics">'+metricSkeleton('CPU')+metricSkeleton('内存')+metricSkeleton('硬盘')+'</div>'+
+    '<div class="nc-foot"></div>';
+  c.querySelector('.nc-name').addEventListener('click',function(){openNodeDetails(id);});
+  c.querySelector('[data-act="detail"]').addEventListener('click',function(){openNodeDetails(id);});
+  setTimeout(function(){c.classList.remove('anim-in');},450);
+  return c;
+}
+function footHtml(s){
+  var total=(s.net_total_in||0)+(s.net_total_out||0);
+  var ver=s.version?(s.version==='dev'?'dev':'v'+s.version):'';
+  return '<span class="chip">↓ <b>'+fmtBytes(s.net_in_speed)+'</b>/s</span>'+
+    '<span class="chip">↑ <b>'+fmtBytes(s.net_out_speed)+'</b>/s</span>'+
+    '<span class="chip">总 <b>'+fmtBytes(total)+'</b></span>'+
+    '<span class="chip">⏱ '+fmtUptime(s.uptime)+'</span>'+
+    pingSummary(s)+
+    (ver?'<span class="chip spacer">'+ver+'</span>':'');
+}
+function updateCard(card,s){
+  var on=isOnline(s);
+  card.classList.toggle('is-off',!on);
+  card.querySelector('.nc-flag').textContent=getFlagEmoji(s.country_code);
+  card.querySelector('.nc-name').textContent=s.name||s.agent_id;
+  card.querySelector('.nc-sub').textContent=(s.os||'等待接入…')+(s.ip&&s.ip!=='Hidden'?' · '+s.ip:'');
+  var pill=card.querySelector('.status-pill');
+  pill.className='status-pill '+(on?'on':'off');
+  pill.querySelector('.st-text').textContent=on?'在线':'离线';
+  var m=card.querySelectorAll('.metric');
+  setMetric(m[0],'cpu',s.cpu_usage);
+  setMetric(m[1],'mem',s.mem_used_percent);
+  setMetric(m[2],'disk',s.disk_used_percent);
+  var foot=card.querySelector('.nc-foot');
+  var fh=footHtml(s);
+  if(foot.dataset.h!==fh){ foot.innerHTML=fh; foot.dataset.h=fh; }
 }
 function pingSummary(s){
   if(!s.ping_results) return '';
@@ -838,6 +911,10 @@ function pingSummary(s){
 }
 function renderNodes(){
   var box=document.getElementById('serverList');
+  // 首屏加载骨架只清一次：旧实现靠 innerHTML 整体覆盖顺带清掉，
+  // 改成增量更新后必须显式移除，否则骨架会一直残留在列表末尾。
+  var skels=box.getElementsByClassName('skel');
+  while(skels.length) skels[0].remove();
   var q=(document.getElementById('nodeSearch').value||'').toLowerCase().trim();
   var ids=Object.keys(statsData).filter(function(id){
     if(!q) return true;
@@ -862,43 +939,27 @@ function renderNodes(){
   });
 
   if(!ids.length){
+    Object.keys(cardMap).forEach(function(k){cardMap[k].remove();delete cardMap[k];});
     box.className='node-grid';
     box.innerHTML='<div class="empty"><div class="empty-ic">'+(q?'🔍':'🛰️')+'</div>'+
       (q?'没有匹配的节点':'暂无活跃节点<br><span style="font-size:13px;color:var(--text-mute)">点击「系统管理 → 添加节点」获取安装命令</span>')+'</div>';
     return;
   }
-
-  var html='';
-  ids.forEach(function(id){
-    var s=statsData[id], on=isOnline(s);
-    var flag=getFlagEmoji(s.country_code);
-    var name=s.name||s.agent_id;
-    var sub=(s.os||'等待接入…')+(s.ip&&s.ip!=='Hidden'?' · '+s.ip:'');
-    var total=(s.net_total_in||0)+(s.net_total_out||0);
-    var ver=s.version?(s.version==='dev'?'dev':'v'+s.version):'';
-    html+='<div class="node-card'+(on?'':' is-off')+'">'+
-      '<div class="nc-top">'+
-        '<span class="nc-flag">'+flag+'</span>'+
-        '<span class="nc-id"><span class="nc-name" onclick="openNodeDetails(\''+id+'\')" title="查看详情">'+escapeHtml(name)+'</span>'+
-        '<span class="nc-sub">'+escapeHtml(sub)+'</span></span>'+
-        '<span class="nc-right">'+
-          '<span class="status-pill '+(on?'on':'off')+'"><i class="dot"></i>'+(on?'在线':'离线')+'</span>'+
-          '<button class="icon-btn" onclick="openNodeDetails(\''+id+'\')" title="详情">📈</button>'+
-        '</span>'+
-      '</div>'+
-      '<div class="nc-metrics">'+metricHtml('CPU',s.cpu_usage)+metricHtml('内存',s.mem_used_percent)+metricHtml('硬盘',s.disk_used_percent)+'</div>'+
-      '<div class="nc-foot">'+
-        '<span class="chip">↓ <b>'+fmtBytes(s.net_in_speed)+'</b>/s</span>'+
-        '<span class="chip">↑ <b>'+fmtBytes(s.net_out_speed)+'</b>/s</span>'+
-        '<span class="chip">总 <b>'+fmtBytes(total)+'</b></span>'+
-        '<span class="chip">⏱ '+fmtUptime(s.uptime)+'</span>'+
-        pingSummary(s)+
-        (ver?'<span class="chip spacer">'+ver+'</span>':'')+
-      '</div>'+
-    '</div>';
-  });
+  if(box.firstElementChild&&box.firstElementChild.classList.contains('empty')) box.innerHTML='';
   box.className='node-grid'+(viewMode==='list'?' list-view':'');
-  box.innerHTML=html;
+
+  var seen={};
+  ids.forEach(function(id,idx){
+    seen[id]=1;
+    var card=cardMap[id];
+    if(!card){ card=buildCard(id); cardMap[id]=card; }
+    updateCard(card,statsData[id]);
+    // 仅调整位置，不重建节点（重建会打断动画/悬停/过渡）
+    if(box.children[idx]!==card) box.insertBefore(card,box.children[idx]||null);
+  });
+  Object.keys(cardMap).forEach(function(id){
+    if(!seen[id]){ cardMap[id].remove(); delete cardMap[id]; }
+  });
 }
 function renderOverview(){
   var ids=Object.keys(statsData), on=0, cpu=0, net=0, alive=0;
@@ -909,18 +970,24 @@ function renderOverview(){
   });
   var avg=alive?cpu/alive:0;
   var cards=[
-    ['🖥️','总节点',ids.length,'', 'var(--primary)','共 '+ids.length+' 台'],
-    ['✅','在线',on,'', 'var(--success)', ids.length?Math.round(on/ids.length*100)+'% 存活率':'—'],
-    ['⚠️','离线',ids.length-on,'', 'var(--danger)', ids.length-on?'需检查':'一切正常'],
-    ['📊','平均 CPU',avg.toFixed(0),'%', avg>80?'var(--danger)':'var(--info)','实时负载'],
-    ['🌐','总速率',fmtBytes(net),'', 'var(--violet)','↓↑ 合计']
+    ['🖥️','总节点',String(ids.length),'','var(--primary)','共 '+ids.length+' 台'],
+    ['✅','在线',String(on),'','var(--success)',ids.length?Math.round(on/ids.length*100)+'% 存活率':'—'],
+    ['⚠️','离线',String(ids.length-on),'','var(--danger)',ids.length-on?'需检查':'一切正常'],
+    ['📊','平均 CPU',avg.toFixed(0),'%',avg>80?'var(--danger)':'var(--info)','实时负载'],
+    ['🌐','总速率',fmtBytes(net),'','var(--violet)','↓↑ 合计']
   ];
-  var html='';
-  cards.forEach(function(c){
-    html+='<div class="ov-card" style="--ov-accent:'+c[4]+'"><div class="ov-top"><span class="ov-ic">'+c[0]+'</span><span class="ov-label">'+c[1]+'</span></div>'+
-      '<div class="ov-value">'+c[2]+'<span class="ov-unit">'+c[3]+'</span></div><div class="ov-foot">'+c[5]+'</div></div>';
+  var box=document.getElementById('overview');
+  if(box.children.length!==cards.length){
+    box.innerHTML=cards.map(function(c){
+      return '<div class="ov-card" style="--ov-accent:'+c[4]+'"><div class="ov-top"><span class="ov-ic">'+c[0]+'</span>'+
+        '<span class="ov-label">'+c[1]+'</span></div><div class="ov-value"></div><div class="ov-foot"></div></div>';
+    }).join('');
+  }
+  cards.forEach(function(c,i){
+    var el=box.children[i]; if(!el) return;
+    el.querySelector('.ov-value').innerHTML=c[2]+(c[3]?'<span class="ov-unit">'+c[3]+'</span>':'');
+    el.querySelector('.ov-foot').textContent=c[5];
   });
-  document.getElementById('overview').innerHTML=html;
 }
 function updateStats(){
   fetch('/api/stats').then(function(r){return r.json()}).then(function(data){
@@ -958,6 +1025,19 @@ function switchTab(t){
   var btn=document.querySelector('.sidebar-btn[data-tab="'+t+'"]');
   if(btn) btn.classList.add('active');
   if(t==='update' && isAdmin && !latestVersion) checkUpdate(true);
+  if(t==='install' && isAdmin) refreshInstallInfo();
+}
+/* 提示面板当前缓存了哪些架构的客户端二进制：
+   arm64 没缓存时，arm64 机器执行安装命令会拿到 404，提前告知避免踩坑 */
+function refreshInstallInfo(){
+  var el=document.getElementById('installArchHint');
+  if(!el) return;
+  fetch('/api/settings/update/info').then(function(r){return r.json()}).then(function(d){
+    var a=(d.archs||[]);
+    el.innerHTML=a.length
+      ? '📦 面板已缓存客户端二进制: <b>'+a.join(' / ')+'</b>'
+      : '⚠️ 面板尚未缓存任何客户端二进制。若目标机器是 <b>arm64</b> 且面板自身为 amd64，安装会失败 —— 请先到「版本更新 → 同步最新版本」。';
+  }).catch(function(){ el.innerHTML=''; });
 }
 function openSettings(){
   document.getElementById('settingsModal').classList.add('open');
@@ -991,7 +1071,9 @@ function createNode(){
   fetch('/api/settings/create_node',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'name='+encodeURIComponent(name)})
   .then(function(r){return r.json()}).then(function(d){
     if(d.status==='ok'){
-      copyText(d.cmd);
+      // 后端已按同一模板生成；万一旧版后端没返回 cmd，前端用本地模板兜底
+      var cmd=d.cmd||buildInstallCmd(d.id, customUrl||window.location.origin, currentToken);
+      copyText(cmd);
       document.getElementById('newNodeName').value='';
       loadNodeList(); updateStats();
     } else toast('创建失败','err');
@@ -1009,17 +1091,22 @@ function executeSaveToken(){
   fetch('/api/settings/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'token='+encodeURIComponent(t)})
   .then(function(){closeTokenConfirm();currentToken=t;toast('Token 已更新','ok');});
 }
+/* 安装命令不再内联进 onclick：命令里同时含单引号和双引号，
+   内联进 HTML 属性必然要来回转义，很容易出错。改为按 id 存表。 */
+var installCmds={};
+function copyInstallCmd(id){ copyText(installCmds[id]||''); }
 function loadNodeList(){
   if(!isAdmin) return;
   var ids=Object.keys(statsData).sort(function(a,b){return (statsData[b].install_time||0)-(statsData[a].install_time||0);});
   var el=document.getElementById('nodeList');
+  installCmds={};
   if(!ids.length){el.innerHTML='<div style="text-align:center;padding:26px;color:var(--text-sub)">暂无接入节点</div>';return;}
   var html='';
   ids.forEach(function(id){
     var s=statsData[id];
     var serverAddr=customUrl||window.location.origin;
-    var cmd='curl -L -o monitor '+serverAddr+'/api/download && chmod +x monitor && ./monitor -mode install -server '+serverAddr+' -token '+currentToken+' -id '+id;
-    var safeCmd=cmd.replace(/"/g,'&quot;');
+    // 命令内自带 uname -m 探测，目标机器自行拉取 amd64 / arm64 二进制
+    installCmds[id]=buildInstallCmd(id, serverAddr, currentToken);
     var ver=s.version?(s.version==='dev'?'dev':'v'+s.version):'—';
     html+='<div class="node-row">'+
       '<div style="flex:1;min-width:150px"><div style="font-weight:600;font-size:14px">'+escapeHtml(s.name||s.agent_id)+'</div>'+
@@ -1029,7 +1116,7 @@ function loadNodeList(){
         '<input type="number" class="input-text" style="width:62px;padding:7px;text-align:center" value="'+(s.sort_order||0)+'" placeholder="排序" id="s-'+id+'">'+
         '<input type="text" class="input-text" style="width:130px;padding:7px" value="'+escapeHtml(s.name||'')+'" placeholder="设置别名" id="n-'+id+'">'+
         '<button class="btn-primary btn-sm" onclick="saveNode(\''+id+'\')">保存</button>'+
-        '<button class="btn-outline btn-sm" onclick="copyText(\''+safeCmd+'\')" title="复制安装命令">📋</button>'+
+        '<button class="btn-outline btn-sm" onclick="copyInstallCmd(\''+id+'\')" title="复制安装命令（自动识别 amd64 / arm64）">📋</button>'+
         '<button class="btn-del" onclick="deleteNode(\''+id+'\')" title="删除节点">🗑️</button>'+
       '</div></div>';
   });
@@ -1156,10 +1243,16 @@ function loadAgentUpdateList(){
 }
 function renderAgentUpdateList(){
   if(!isAdmin) return;
+  var modal=document.getElementById('settingsModal');
+  if(!modal||!modal.classList.contains('open')) return; // 弹窗未打开时不必刷新
   var el=document.getElementById('agentUpdateList');
   if(!el) return;
   var ids=Object.keys(statsData);
-  if(!ids.length){el.innerHTML='<div style="color:var(--text-mute);font-size:13px;padding:14px 0">暂无节点</div>';return;}
+  if(!ids.length){
+    if(el.dataset.h!=='__empty__'){ el.dataset.h='__empty__';
+      el.innerHTML='<div style="color:var(--text-mute);font-size:13px;padding:14px 0">暂无节点</div>'; }
+    return;
+  }
   var html='';
   ids.sort(function(a,b){return (statsData[a].name||'').localeCompare(statsData[b].name||'');});
   ids.forEach(function(id){
@@ -1177,6 +1270,9 @@ function renderAgentUpdateList(){
       '<button class="btn-primary btn-sm" onclick="pushUpdate(\''+id+'\')">更新</button>'+
     '</div>';
   });
+  // 内容没变就不重建：避免每 2 秒覆盖一次，导致正在点击的按钮失效
+  if(el.dataset.h===html) return;
+  el.dataset.h=html;
   el.innerHTML=html;
 }
 function pushUpdate(id){

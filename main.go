@@ -47,21 +47,21 @@ var (
 	statusCache = make(map[string]SystemStatus)
 	cacheMutex  sync.RWMutex
 	db          *gorm.DB
-	
+
 	globalConfig struct {
 		sync.RWMutex
-		Token       string
-		ServerURL   string
-		TGToken     string
-		TGChatID    string
-		WebhookURL  string
+		Token      string
+		ServerURL  string
+		TGToken    string
+		TGChatID   string
+		WebhookURL string
 		// === 外观配置 ===
-		SiteTheme   string 
-		BgType      string 
+		SiteTheme   string
+		BgType      string
 		BgCustomURL string
-		BgBlur      int    
+		BgBlur      int
 		CardOpacity float64
-		CardPadding int 
+		CardPadding int
 		// ===============
 		PingTargets []PingTargetConfig
 		// === 更新配置 ===
@@ -70,7 +70,7 @@ var (
 		RestartCmd         string // 更新后重启命令（留空自动检测）
 		AgentBundleVersion string // 面板已缓存的客户端版本
 	}
-	
+
 	alertState = make(map[string]bool)
 )
 
@@ -89,23 +89,23 @@ type AppConfig struct {
 
 type Node struct {
 	AgentID       string `gorm:"primaryKey"`
-	Name          string 
-	HideID        bool   `gorm:"default:true"`
-	SortOrder     int    `gorm:"default:0"`
-	Denied        bool   `gorm:"default:false"`
-	CountryCode   string 
-	Arch          string // 客户端 CPU 架构 (amd64/arm64)
-	AgentVersion  string // 客户端上报的程序版本
-	PendingUpdate string // 待下发的客户端版本号
+	Name          string
+	HideID        bool `gorm:"default:true"`
+	SortOrder     int  `gorm:"default:0"`
+	Denied        bool `gorm:"default:false"`
+	CountryCode   string
+	Arch          string    // 客户端 CPU 架构 (amd64/arm64)
+	AgentVersion  string    // 客户端上报的程序版本
+	PendingUpdate string    // 待下发的客户端版本号
 	CreatedAt     time.Time // [新增] 用于记录添加时间
 }
 
 type MonitorHistory struct {
-	ID        uint      `gorm:"primaryKey"`
-	AgentID   string    `gorm:"index"`
-	Type      string    `gorm:"index"`
-	Target    string    
-	Value     float64   
+	ID        uint   `gorm:"primaryKey"`
+	AgentID   string `gorm:"index"`
+	Type      string `gorm:"index"`
+	Target    string
+	Value     float64
 	CreatedAt time.Time `gorm:"index"`
 }
 
@@ -117,7 +117,7 @@ type SystemStatus struct {
 	HideID          bool               `json:"hide_id"`
 	SortOrder       int                `json:"sort_order"`
 	CountryCode     string             `json:"country_code"`
-	PingTargets     []PingTargetConfig `json:"ping_targets"` 
+	PingTargets     []PingTargetConfig `json:"ping_targets"`
 	OS              string             `json:"os"`
 	IP              string             `json:"ip"`
 	Uptime          uint64             `json:"uptime"`
@@ -130,9 +130,9 @@ type SystemStatus struct {
 	NetTotalOut     uint64             `json:"net_total_out"`
 	PingResults     map[string]int64   `json:"ping_results"`
 	LastUpdate      time.Time          `json:"last_update"`
-	InstallTime     int64              `json:"install_time"` // [新增] 用于前端排序
-	Version         string             `json:"version"`      // [新增] 客户端/面板程序版本
-	Arch            string             `json:"arch"`         // [新增] CPU 架构
+	InstallTime     int64              `json:"install_time"`   // [新增] 用于前端排序
+	Version         string             `json:"version"`        // [新增] 客户端/面板程序版本
+	Arch            string             `json:"arch"`           // [新增] CPU 架构
 	PendingUpdate   string             `json:"pending_update"` // [新增] 待更新版本（仅管理员可见）
 }
 
@@ -163,7 +163,9 @@ func main() {
 	flag.Parse()
 
 	if *mode == "agent" {
-		if *tkn == "" || *aid == "" { panic("Agent need -token and -id") }
+		if *tkn == "" || *aid == "" {
+			panic("Agent need -token and -id")
+		}
 		runAgent(*sAddr, *tkn, *aid)
 	} else if *mode == "install" {
 		installAgent(*sAddr, *tkn, *aid)
@@ -180,7 +182,10 @@ func main() {
 func installAgent(server, token, id string) {
 	fmt.Println(">> 正在安装监控 Agent...")
 	binPath, err := filepath.Abs(os.Args[0])
-	if err != nil { fmt.Println("错误: 无法获取文件路径"); return }
+	if err != nil {
+		fmt.Println("错误: 无法获取文件路径")
+		return
+	}
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
 		installOpenRC(binPath, server, token, id)
 	} else {
@@ -223,13 +228,35 @@ pidfile="/run/monitor.pid"
 	fmt.Println("✅ 安装成功! 服务已启动并设置开机自启。")
 }
 
+// ================= 安装命令生成 =================
+
+// installCmdTmpl 是面板下发给用户的 Agent 安装命令模板。
+// 占位符由 installCommand() 替换；前端也会拿到同一份模板（面板模板变量 InstallTmpl），
+// 这样「新建节点」与「复制已有节点命令」两处永远生成同一条命令，不会各自漂移。
+//
+// 为什么要让命令自己探测架构：面板此刻只知道有个节点要装，
+// 并不知道那台机器是 amd64 还是 arm64 —— 只有对方自己 uname -m 才准。
+// 下发错误架构的二进制，对方得到的只是 "cannot execute binary file"。
+const installCmdTmpl = `A=$(uname -m);case "$A" in x86_64|amd64)A=amd64;;aarch64|arm64)A=arm64;;*)echo "不支持的架构: $A (仅支持 x86_64 / aarch64)";exit 1;;esac;rm -f monitor;curl -fL -o monitor "__SERVER__/api/download?arch=$A" && chmod +x monitor && ./monitor -mode install -server '__SERVER__' -token '__TOKEN__' -id '__ID__'`
+
+// installCommand 把模板渲染成可直接粘贴执行的一条命令
+func installCommand(serverURL, token, id string) string {
+	return strings.NewReplacer(
+		"__SERVER__", strings.TrimRight(serverURL, "/"),
+		"__TOKEN__", token,
+		"__ID__", id,
+	).Replace(installCmdTmpl)
+}
+
 // ================= 服务端 =================
 
 func runServer(port string) {
 	var err error
 	db, err = gorm.Open(sqlite.Open("monitor.db"), &gorm.Config{})
-	if err != nil { panic(err) }
-	
+	if err != nil {
+		panic(err)
+	}
+
 	db.AutoMigrate(&User{}, &AppConfig{}, &Node{}, &MonitorHistory{})
 	loadGlobalConfig()
 	go monitorAlerts()
@@ -237,7 +264,7 @@ func runServer(port string) {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
-	
+
 	// 安全增强: 随机生成 Session Key
 	var sessionKey []byte
 	if envKey := os.Getenv("SESSION_KEY"); envKey != "" {
@@ -251,118 +278,195 @@ func runServer(port string) {
 	store.Options(sessions.Options{Path: "/", MaxAge: 3600 * 24, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	r.Use(sessions.Sessions("mysession", store))
 
-	// 下载程序本体：优先分发与 ?arch= 匹配的客户端二进制，否则回退到自身
+	// 下载程序本体：按 ?arch= 分发对应架构的 Agent 二进制。
+	// 不带 arch 参数时保持旧行为（分发面板自身二进制）。
 	r.GET("/api/download", func(c *gin.Context) {
-		if arch := normalizeArch(c.Query("arch")); arch == "amd64" || arch == "arm64" {
-			if p := agentBinaryPath(arch); fileExists(p) {
-				c.FileAttachment(p, "monitor")
-				return
-			}
+		raw := c.Query("arch")
+		if raw == "" {
+			c.File("./monitor")
+			return
 		}
-		c.File("./monitor")
+		arch := normalizeArch(raw)
+		if arch != "amd64" && arch != "arm64" {
+			c.String(400, "不支持的架构: %s（仅支持 amd64 / arm64）\n", raw)
+			return
+		}
+		// 优先分发面板已缓存的对应架构二进制
+		if p := agentBinaryPath(arch); fileExists(p) {
+			c.Header("X-Binary-Arch", arch)
+			c.FileAttachment(p, "monitor")
+			return
+		}
+		// 没缓存时，只有面板自身就是该架构，才可以拿自己顶上。
+		// 否则宁可明确报错，也不能下发错误架构的二进制 —— 对方拿到的只会是
+		// "cannot execute binary file"，比下载失败更难排查。
+		if arch == runtime.GOARCH {
+			c.Header("X-Binary-Arch", arch)
+			c.File("./monitor")
+			return
+		}
+		c.String(404, "面板尚未缓存 %s 架构的 Agent 二进制（面板自身为 %s）。\n"+
+			"请先在面板「系统管理 → 版本更新」点击「同步最新版本」，再重新执行安装命令。\n",
+			arch, runtime.GOARCH)
 	})
 
 	// Agent 自更新专用下载（需 Token）
 	r.GET("/api/agent/binary", func(c *gin.Context) {
-		globalConfig.RLock(); t := globalConfig.Token; globalConfig.RUnlock()
+		globalConfig.RLock()
+		t := globalConfig.Token
+		globalConfig.RUnlock()
 		clientToken := c.GetHeader("Authorization")
-		if clientToken == "" { clientToken = c.Query("token") }
-		if clientToken == "" || clientToken != t { c.AbortWithStatus(401); return }
+		if clientToken == "" {
+			clientToken = c.Query("token")
+		}
+		if clientToken == "" || clientToken != t {
+			c.AbortWithStatus(401)
+			return
+		}
 
 		arch := normalizeArch(c.Query("arch"))
-		if arch != "amd64" && arch != "arm64" { c.AbortWithStatus(400); return }
+		if arch != "amd64" && arch != "arm64" {
+			c.AbortWithStatus(400)
+			return
+		}
 		p := agentBinaryPath(arch)
-		if !fileExists(p) { c.AbortWithStatus(404); return }
+		if !fileExists(p) {
+			c.AbortWithStatus(404)
+			return
+		}
 		c.FileAttachment(p, "monitor")
 	})
 
 	r.GET("/", func(c *gin.Context) {
-		var cnt int64; db.Model(&User{}).Count(&cnt)
-		if cnt == 0 { c.Redirect(302, "/setup"); return }
+		var cnt int64
+		db.Model(&User{}).Count(&cnt)
+		if cnt == 0 {
+			c.Redirect(302, "/setup")
+			return
+		}
 		dashboardHandler(c)
 	})
-	
+
 	r.GET("/setup", func(c *gin.Context) {
-		var cnt int64; db.Model(&User{}).Count(&cnt)
-		if cnt>0{c.Redirect(302,"/login");return}
-		globalConfig.RLock(); 
-		theme := globalConfig.SiteTheme; 
-		bgType:=globalConfig.BgType; bgUrl:=globalConfig.BgCustomURL; bgBlur:=globalConfig.BgBlur; cardOp:=globalConfig.CardOpacity;
+		var cnt int64
+		db.Model(&User{}).Count(&cnt)
+		if cnt > 0 {
+			c.Redirect(302, "/login")
+			return
+		}
+		globalConfig.RLock()
+		theme := globalConfig.SiteTheme
+		bgType := globalConfig.BgType
+		bgUrl := globalConfig.BgCustomURL
+		bgBlur := globalConfig.BgBlur
+		cardOp := globalConfig.CardOpacity
 		globalConfig.RUnlock()
-		t,_:=template.New("s").Parse(htmlLogin); t.Execute(c.Writer, map[string]interface{}{
-			"Action":   "/setup", 
-			"Title":    "初始化设置", 
-			"Subtitle": "创建管理员账号", 
+		t, _ := template.New("s").Parse(htmlLogin)
+		t.Execute(c.Writer, map[string]interface{}{
+			"Action":   "/setup",
+			"Title":    "初始化设置",
+			"Subtitle": "创建管理员账号",
 			"BtnText":  "立即注册",
-			"Theme": theme,
-			"BgType": bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
+			"Theme":    theme,
+			"BgType":   bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
 			"Version": displayVersion(),
-		})})
+		})
+	})
 	r.POST("/setup", func(c *gin.Context) {
-		u,p:=c.PostForm("username"),c.PostForm("password")
-		if u!=""&&p!=""{ db.Create(&User{Username:u,Password:hashPwd(p)}); c.Redirect(302,"/login") }
+		u, p := c.PostForm("username"), c.PostForm("password")
+		if u != "" && p != "" {
+			db.Create(&User{Username: u, Password: hashPwd(p)})
+			c.Redirect(302, "/login")
+		}
 	})
 	r.GET("/login", func(c *gin.Context) {
-		var cnt int64; db.Model(&User{}).Count(&cnt)
-		if cnt == 0 { c.Redirect(302, "/setup"); return }
-		if sessions.Default(c).Get("user")!=nil{c.Redirect(302,"/");return}
-		globalConfig.RLock(); 
-		theme := globalConfig.SiteTheme; 
-		bgType:=globalConfig.BgType; bgUrl:=globalConfig.BgCustomURL; bgBlur:=globalConfig.BgBlur; cardOp:=globalConfig.CardOpacity;
+		var cnt int64
+		db.Model(&User{}).Count(&cnt)
+		if cnt == 0 {
+			c.Redirect(302, "/setup")
+			return
+		}
+		if sessions.Default(c).Get("user") != nil {
+			c.Redirect(302, "/")
+			return
+		}
+		globalConfig.RLock()
+		theme := globalConfig.SiteTheme
+		bgType := globalConfig.BgType
+		bgUrl := globalConfig.BgCustomURL
+		bgBlur := globalConfig.BgBlur
+		cardOp := globalConfig.CardOpacity
 		globalConfig.RUnlock()
-		t,_:=template.New("l").Parse(htmlLogin); t.Execute(c.Writer, map[string]interface{}{
-			"Action":   "/login", 
-			"Title":    "登录", 
-			"Subtitle": "请登录以管理您的节点", 
+		t, _ := template.New("l").Parse(htmlLogin)
+		t.Execute(c.Writer, map[string]interface{}{
+			"Action":   "/login",
+			"Title":    "登录",
+			"Subtitle": "请登录以管理您的节点",
 			"BtnText":  "登 录",
-			"Theme": theme,
-			"BgType": bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
+			"Theme":    theme,
+			"BgType":   bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
 			"Version": displayVersion(),
-		})})
+		})
+	})
 	r.POST("/login", func(c *gin.Context) {
-		u,p:=c.PostForm("username"),c.PostForm("password")
+		u, p := c.PostForm("username"), c.PostForm("password")
 		var user User
 		// 安全增强: 校验加盐哈希
-		if db.Where("username=?",u).First(&user).Error==nil {
+		if db.Where("username=?", u).First(&user).Error == nil {
 			if checkPwd(p, user.Password) {
-				s:=sessions.Default(c); s.Set("user",u); s.Save(); c.Redirect(302,"/")
+				s := sessions.Default(c)
+				s.Set("user", u)
+				s.Save()
+				c.Redirect(302, "/")
 				return
 			}
-		} 
-		c.Redirect(302,"/login")
+		}
+		c.Redirect(302, "/login")
 	})
-	r.GET("/logout", func(c *gin.Context) { s:=sessions.Default(c);s.Clear();s.Save();c.Redirect(302,"/") })
+	r.GET("/logout", func(c *gin.Context) { s := sessions.Default(c); s.Clear(); s.Save(); c.Redirect(302, "/") })
 
 	api := r.Group("/api")
 	{
 		api.POST("/report", func(c *gin.Context) {
-			globalConfig.RLock(); t:=globalConfig.Token; targets:=globalConfig.PingTargets; globalConfig.RUnlock()
+			globalConfig.RLock()
+			t := globalConfig.Token
+			targets := globalConfig.PingTargets
+			globalConfig.RUnlock()
 			// 安全增强: 优先从 Header 获取 Token
 			clientToken := c.GetHeader("Authorization")
-			if clientToken == "" { clientToken = c.Query("token") } // 兼容旧方式
-			
-			if clientToken != t { c.AbortWithStatus(401); return }
-			
+			if clientToken == "" {
+				clientToken = c.Query("token")
+			} // 兼容旧方式
+
+			if clientToken != t {
+				c.AbortWithStatus(401)
+				return
+			}
+
 			var s SystemStatus
-			if err:=c.ShouldBindJSON(&s); err==nil {
+			if err := c.ShouldBindJSON(&s); err == nil {
 				s.LastUpdate = time.Now()
-				if s.IP == "" { s.IP = c.ClientIP() }
-				
+				if s.IP == "" {
+					s.IP = c.ClientIP()
+				}
+
 				var node Node
-				db.Clauses(clause.OnConflict{DoNothing:true}).Create(&Node{AgentID:s.AgentID})
+				db.Clauses(clause.OnConflict{DoNothing: true}).Create(&Node{AgentID: s.AgentID})
 				db.First(&node, "agent_id = ?", s.AgentID)
-				
+
 				if node.Denied {
 					c.JSON(200, AgentResponse{Status: "stop"})
 					return
 				}
-				
+
 				if node.CountryCode == "" {
 					go func(aid, ip string) {
 						resp, err := http.Get("http://ip-api.com/json/" + ip)
 						if err == nil {
 							defer resp.Body.Close()
-							var res struct{ CountryCode string `json:"countryCode"` }
+							var res struct {
+								CountryCode string `json:"countryCode"`
+							}
 							if json.NewDecoder(resp.Body).Decode(&res) == nil && res.CountryCode != "" {
 								db.Model(&Node{}).Where("agent_id=?", aid).Update("country_code", res.CountryCode)
 							}
@@ -371,11 +475,19 @@ func runServer(port string) {
 				}
 
 				// [新增] 同步客户端架构 / 版本，并处理更新回执
-				if s.Arch != "" { node.Arch = normalizeArch(s.Arch) }
-				if s.Version != "" { node.AgentVersion = s.Version }
+				if s.Arch != "" {
+					node.Arch = normalizeArch(s.Arch)
+				}
+				if s.Version != "" {
+					node.AgentVersion = s.Version
+				}
 				nodeUpdates := map[string]interface{}{}
-				if s.Arch != "" { nodeUpdates["arch"] = normalizeArch(s.Arch) }
-				if s.Version != "" { nodeUpdates["agent_version"] = s.Version }
+				if s.Arch != "" {
+					nodeUpdates["arch"] = normalizeArch(s.Arch)
+				}
+				if s.Version != "" {
+					nodeUpdates["agent_version"] = s.Version
+				}
 				if node.PendingUpdate != "" && s.Version == node.PendingUpdate {
 					nodeUpdates["pending_update"] = ""
 					node.PendingUpdate = ""
@@ -389,7 +501,7 @@ func runServer(port string) {
 						db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "ping", Target: target, Value: float64(delay), CreatedAt: time.Now()})
 					}
 				}
-				if time.Now().Second() < 5 { 
+				if time.Now().Second() < 5 {
 					db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "cpu", Value: s.CPUUsage, CreatedAt: time.Now()})
 					db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "mem", Value: s.MemUsedPercent, CreatedAt: time.Now()})
 					db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "disk", Value: s.DiskUsedPercent, CreatedAt: time.Now()})
@@ -399,61 +511,76 @@ func runServer(port string) {
 				s.HideID = node.HideID
 				s.SortOrder = node.SortOrder
 				s.CountryCode = node.CountryCode
-				s.PingTargets = targets 
+				s.PingTargets = targets
 				s.Arch = node.Arch
 				s.PendingUpdate = ""
 
 				// [新增] 如需更新，随心跳下发自更新指令
 				upd := buildUpdateCommand(node)
-				if upd != nil { s.PendingUpdate = upd.Version }
+				if upd != nil {
+					s.PendingUpdate = upd.Version
+				}
 
-				cacheMutex.Lock(); statusCache[s.AgentID]=s; cacheMutex.Unlock()
+				cacheMutex.Lock()
+				statusCache[s.AgentID] = s
+				cacheMutex.Unlock()
 				c.JSON(200, AgentResponse{Status: "ok", PingTargets: targets, Update: upd})
 			}
 		})
 
 		api.GET("/stats", func(c *gin.Context) {
 			isAdmin := sessions.Default(c).Get("user") != nil
-			
+
 			// 1. 获取所有数据库中的节点
 			var nodes []Node
 			db.Find(&nodes)
 
-			cacheMutex.RLock(); defer cacheMutex.RUnlock()
+			cacheMutex.RLock()
+			defer cacheMutex.RUnlock()
 			res := make(map[string]SystemStatus)
 
 			for _, n := range nodes {
-				if n.Denied { continue }
+				if n.Denied {
+					continue
+				}
 
 				// 2. 优先读取缓存中的实时数据
 				if v, ok := statusCache[n.AgentID]; ok {
-					if !isAdmin { v.IP = "Hidden" }
+					if !isAdmin {
+						v.IP = "Hidden"
+					}
 					// 确保 DB 中的名称同步
 					v.Name = n.Name
 					v.HideID = n.HideID
 					v.SortOrder = n.SortOrder
 					v.CountryCode = n.CountryCode
 					v.InstallTime = n.CreatedAt.Unix() // [新增] 注入安装时间戳
-					if n.Arch != "" { v.Arch = n.Arch }
+					if n.Arch != "" {
+						v.Arch = n.Arch
+					}
 					v.PendingUpdate = n.PendingUpdate
-					if !isAdmin { v.PendingUpdate = "" }
+					if !isAdmin {
+						v.PendingUpdate = ""
+					}
 					res[n.AgentID] = v
 				} else {
 					// 3. 如果缓存没有（新建未连接），构造一个“待机”状态
 					v := SystemStatus{
-						AgentID:     n.AgentID,
-						Name:        n.Name,
-						HideID:      n.HideID,
-						SortOrder:   n.SortOrder,
-						CountryCode: n.CountryCode,
-						OS:          "等待接入...", 
-						LastUpdate:  time.Time{}, // 零值，前端判定为离线
-						InstallTime: n.CreatedAt.Unix(), // [新增] 注入安装时间戳
+						AgentID:       n.AgentID,
+						Name:          n.Name,
+						HideID:        n.HideID,
+						SortOrder:     n.SortOrder,
+						CountryCode:   n.CountryCode,
+						OS:            "等待接入...",
+						LastUpdate:    time.Time{},        // 零值，前端判定为离线
+						InstallTime:   n.CreatedAt.Unix(), // [新增] 注入安装时间戳
 						Arch:          n.Arch,
 						Version:       n.AgentVersion,
 						PendingUpdate: n.PendingUpdate,
 					}
-					if !isAdmin { v.PendingUpdate = "" }
+					if !isAdmin {
+						v.PendingUpdate = ""
+					}
 					res[n.AgentID] = v
 				}
 			}
@@ -465,12 +592,12 @@ func runServer(port string) {
 			var history []MonitorHistory
 			db.Where("agent_id = ? AND type = 'ping'", id).Order("created_at desc").Limit(100).Find(&history)
 			var res []gin.H
-			for i := len(history)-1; i >= 0; i-- {
+			for i := len(history) - 1; i >= 0; i-- {
 				res = append(res, gin.H{"time": history[i].CreatedAt, "delay": history[i].Value, "target": history[i].Target})
 			}
 			c.JSON(200, res)
 		})
-		
+
 		api.GET("/history/full", func(c *gin.Context) {
 			id := c.Query("id")
 			var pings, cpus, mems, disks []MonitorHistory
@@ -478,16 +605,16 @@ func runServer(port string) {
 			db.Where("agent_id = ? AND type = 'cpu'", id).Order("created_at desc").Limit(50).Find(&cpus)
 			db.Where("agent_id = ? AND type = 'mem'", id).Order("created_at desc").Limit(50).Find(&mems)
 			db.Where("agent_id = ? AND type = 'disk'", id).Order("created_at desc").Limit(50).Find(&disks)
-			
+
 			fmtData := func(list []MonitorHistory) []gin.H {
 				// 初始化空切片，避免无数据时序列化成 null
 				res := make([]gin.H, 0, len(list))
-				for i := len(list)-1; i >= 0; i-- {
+				for i := len(list) - 1; i >= 0; i-- {
 					res = append(res, gin.H{"time": list[i].CreatedAt, "val": list[i].Value, "target": list[i].Target})
 				}
 				return res
 			}
-			
+
 			c.JSON(200, gin.H{
 				"ping": fmtData(pings),
 				"cpu":  fmtData(cpus),
@@ -498,41 +625,54 @@ func runServer(port string) {
 
 		// Bing 壁纸代理
 		api.GET("/bing", func(c *gin.Context) {
-    // 1. 定义接口地址 (推荐使用 www 以获得更好的国际连通性，也可改回 cn)
-    const bingBase = "https://www.bing.com"
-    apiURL := bingBase + "/HPImageArchive.aspx?format=js&idx=0&n=1"
+			// 1. 定义接口地址 (推荐使用 www 以获得更好的国际连通性，也可改回 cn)
+			const bingBase = "https://www.bing.com"
+			apiURL := bingBase + "/HPImageArchive.aspx?format=js&idx=0&n=1"
 
-    // 2. 创建请求
-    client := &http.Client{Timeout: 5 * time.Second}
-    req, err := http.NewRequest("GET", apiURL, nil)
-    if err != nil { c.Status(500); return }
+			// 2. 创建请求
+			client := &http.Client{Timeout: 5 * time.Second}
+			req, err := http.NewRequest("GET", apiURL, nil)
+			if err != nil {
+				c.Status(500)
+				return
+			}
 
-    // 3. 关键：伪装 User-Agent，防止被 Bing 拦截
-    req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+			// 3. 关键：伪装 User-Agent，防止被 Bing 拦截
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-    // 4. 发起请求
-    resp, err := client.Do(req)
-    if err != nil { c.Status(500); return }
-    defer resp.Body.Close()
+			// 4. 发起请求
+			resp, err := client.Do(req)
+			if err != nil {
+				c.Status(500)
+				return
+			}
+			defer resp.Body.Close()
 
-    // 5. 解析并重定向
-    var res struct{ Images []struct{ Url string `json:"url"` } `json:"images"` }
-    if json.NewDecoder(resp.Body).Decode(&res) == nil && len(res.Images) > 0 {
-        // 拼接完整的图片地址并重定向
-        c.Redirect(302, bingBase+res.Images[0].Url)
-    } else {
-        c.Status(500)
-    }
-})
+			// 5. 解析并重定向
+			var res struct {
+				Images []struct {
+					Url string `json:"url"`
+				} `json:"images"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&res) == nil && len(res.Images) > 0 {
+				// 拼接完整的图片地址并重定向
+				c.Redirect(302, bingBase+res.Images[0].Url)
+			} else {
+				c.Status(500)
+			}
+		})
 
 		auth := api.Group("/")
 		auth.Use(authMiddleware())
 		{
 			auth.POST("/settings/create_node", func(c *gin.Context) {
 				name := c.PostForm("name")
-				if name == "" { c.JSON(400, gin.H{"status": "error"}); return }
+				if name == "" {
+					c.JSON(400, gin.H{"status": "error"})
+					return
+				}
 
-				b := make([]byte, 3) 
+				b := make([]byte, 3)
 				rand.Read(b)
 				id := hex.EncodeToString(b)
 
@@ -542,14 +682,16 @@ func runServer(port string) {
 				serverURL := globalConfig.ServerURL
 				if serverURL == "" {
 					scheme := "http"
-					if c.Request.TLS != nil { scheme = "https" }
+					if c.Request.TLS != nil {
+						scheme = "https"
+					}
 					serverURL = scheme + "://" + c.Request.Host
 				}
 				token := globalConfig.Token
 				globalConfig.RUnlock()
 
-				downloadUrl := serverURL + "/api/download"
-				cmd := fmt.Sprintf("curl -L -o monitor %s && chmod +x monitor && ./monitor -mode install -server %s -token %s -id %s", downloadUrl, serverURL, token, id)
+				// 命令内含 uname -m 探测，目标机器自行选择 amd64 / arm64 二进制
+				cmd := installCommand(serverURL, token, id)
 
 				c.JSON(200, gin.H{
 					"status": "ok",
@@ -559,16 +701,35 @@ func runServer(port string) {
 			})
 
 			auth.POST("/settings/token", func(c *gin.Context) {
-				t:=c.PostForm("token"); if len(t)<3{c.Status(400);return}
-				saveConfig("token", t); globalConfig.Lock(); globalConfig.Token=t; globalConfig.Unlock(); c.Status(200)
+				t := c.PostForm("token")
+				if len(t) < 3 {
+					c.Status(400)
+					return
+				}
+				saveConfig("token", t)
+				globalConfig.Lock()
+				globalConfig.Token = t
+				globalConfig.Unlock()
+				c.Status(200)
 			})
 			auth.POST("/settings/url", func(c *gin.Context) {
-				u:=c.PostForm("url"); saveConfig("server_url", u); globalConfig.Lock(); globalConfig.ServerURL=u; globalConfig.Unlock(); c.Status(200)
+				u := c.PostForm("url")
+				saveConfig("server_url", u)
+				globalConfig.Lock()
+				globalConfig.ServerURL = u
+				globalConfig.Unlock()
+				c.Status(200)
 			})
 			auth.POST("/settings/alert", func(c *gin.Context) {
 				tk, ch, wh := c.PostForm("token"), c.PostForm("chat"), c.PostForm("webhook")
-				saveConfig("tg_token", tk); saveConfig("tg_chat", ch); saveConfig("webhook_url", wh)
-				globalConfig.Lock(); globalConfig.TGToken=tk; globalConfig.TGChatID=ch; globalConfig.WebhookURL=wh; globalConfig.Unlock()
+				saveConfig("tg_token", tk)
+				saveConfig("tg_chat", ch)
+				saveConfig("webhook_url", wh)
+				globalConfig.Lock()
+				globalConfig.TGToken = tk
+				globalConfig.TGChatID = ch
+				globalConfig.WebhookURL = wh
+				globalConfig.Unlock()
 				c.Status(200)
 			})
 			auth.POST("/settings/test_alert", func(c *gin.Context) {
@@ -579,43 +740,53 @@ func runServer(port string) {
 				id := c.PostForm("id")
 				name := c.PostForm("name")
 				sort, _ := strconv.Atoi(c.PostForm("sort"))
-				db.Model(&Node{}).Where("agent_id=?",id).Updates(map[string]interface{}{"name":name, "sort_order":sort})
+				db.Model(&Node{}).Where("agent_id=?", id).Updates(map[string]interface{}{"name": name, "sort_order": sort})
 				c.Status(200)
 			})
-			
+
 			auth.POST("/settings/theme", func(c *gin.Context) {
 				t := c.PostForm("theme")
 				if t == "dark" || t == "light" {
 					saveConfig("site_theme", t)
-					globalConfig.Lock(); globalConfig.SiteTheme = t; globalConfig.Unlock()
+					globalConfig.Lock()
+					globalConfig.SiteTheme = t
+					globalConfig.Unlock()
 					c.Status(200)
 				} else {
 					c.Status(400)
 				}
 			})
-			
+
 			auth.GET("/settings/get_global_targets", func(c *gin.Context) {
-				globalConfig.RLock(); defer globalConfig.RUnlock()
+				globalConfig.RLock()
+				defer globalConfig.RUnlock()
 				c.JSON(200, globalConfig.PingTargets)
 			})
-			
+
 			auth.POST("/settings/save_global_targets", func(c *gin.Context) {
 				var targets []PingTargetConfig
 				if c.ShouldBindJSON(&targets) == nil {
 					b, _ := json.Marshal(targets)
 					saveConfig("sys_ping_targets", string(b))
-					globalConfig.Lock(); globalConfig.PingTargets = targets; globalConfig.Unlock()
+					globalConfig.Lock()
+					globalConfig.PingTargets = targets
+					globalConfig.Unlock()
 					c.Status(200)
 				}
 			})
-			
+
 			auth.POST("/settings/toggle_hide", func(c *gin.Context) {
-				var n Node; db.First(&n,"agent_id=?",c.PostForm("id")); db.Model(&n).Update("hide_id", !n.HideID); c.Status(200)
+				var n Node
+				db.First(&n, "agent_id=?", c.PostForm("id"))
+				db.Model(&n).Update("hide_id", !n.HideID)
+				c.Status(200)
 			})
 			auth.POST("/settings/delete", func(c *gin.Context) {
-				id:=c.PostForm("id"); 
+				id := c.PostForm("id")
 				db.Model(&Node{}).Where("agent_id=?", id).Update("denied", true)
-				cacheMutex.Lock(); delete(statusCache, id); cacheMutex.Unlock()
+				cacheMutex.Lock()
+				delete(statusCache, id)
+				cacheMutex.Unlock()
 				c.Status(200)
 			})
 
@@ -626,7 +797,7 @@ func runServer(port string) {
 				b := c.PostForm("blur")
 				o := c.PostForm("opacity")
 				p := c.PostForm("padding") // 获取内边距参数
-				
+
 				saveConfig("bg_type", t)
 				saveConfig("bg_custom_url", u)
 				saveConfig("bg_blur", b)
@@ -648,7 +819,10 @@ func runServer(port string) {
 			// 检查更新
 			auth.GET("/settings/update/check", func(c *gin.Context) {
 				rel, err := cachedLatestRelease(false)
-				if err != nil { c.JSON(200, gin.H{"error": err.Error()}); return }
+				if err != nil {
+					c.JSON(200, gin.H{"error": err.Error()})
+					return
+				}
 				c.JSON(200, gin.H{
 					"current":      BuildVersion,
 					"latest":       rel.Version,
@@ -669,7 +843,10 @@ func runServer(port string) {
 				updateState.Lock()
 				busy := updateState.Busy
 				updateState.Unlock()
-				if busy { c.JSON(200, gin.H{"error": "已有更新任务正在进行"}); return }
+				if busy {
+					c.JSON(200, gin.H{"error": "已有更新任务正在进行"})
+					return
+				}
 				startServerUpdate()
 				c.Status(200)
 			})
@@ -679,7 +856,10 @@ func runServer(port string) {
 				updateState.Lock()
 				busy := updateState.Busy
 				updateState.Unlock()
-				if busy { c.JSON(200, gin.H{"error": "已有更新任务正在进行"}); return }
+				if busy {
+					c.JSON(200, gin.H{"error": "已有更新任务正在进行"})
+					return
+				}
 				startAgentSync()
 				c.Status(200)
 			})
@@ -687,7 +867,10 @@ func runServer(port string) {
 			// 下发客户端更新指令（id=all 表示全部）
 			auth.POST("/settings/update/agent_push", func(c *gin.Context) {
 				n, err := pushAgentUpdate(c.PostForm("id"))
-				if err != nil { c.JSON(200, gin.H{"error": err.Error()}); return }
+				if err != nil {
+					c.JSON(200, gin.H{"error": err.Error()})
+					return
+				}
 				c.JSON(200, gin.H{"count": n})
 			})
 
@@ -696,7 +879,9 @@ func runServer(port string) {
 				globalConfig.RLock()
 				repo, proxy, cmd, bundle := globalConfig.UpdateRepo, globalConfig.UpdateProxy, globalConfig.RestartCmd, globalConfig.AgentBundleVersion
 				globalConfig.RUnlock()
-				if repo == "" { repo = defaultRepo }
+				if repo == "" {
+					repo = defaultRepo
+				}
 				c.JSON(200, gin.H{"repo": repo, "proxy": proxy, "cmd": cmd, "bundle": bundle, "archs": cachedArchList()})
 			})
 
@@ -749,13 +934,17 @@ func cleanupHistory() {
 }
 
 func sendAlert(msg string) {
-	globalConfig.RLock(); token:=globalConfig.TGToken; chat:=globalConfig.TGChatID; wh:=globalConfig.WebhookURL; globalConfig.RUnlock()
-	
+	globalConfig.RLock()
+	token := globalConfig.TGToken
+	chat := globalConfig.TGChatID
+	wh := globalConfig.WebhookURL
+	globalConfig.RUnlock()
+
 	// Telegram
 	if token != "" && chat != "" {
 		http.PostForm(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token), map[string][]string{"chat_id": {chat}, "text": {msg}})
 	}
-	
+
 	// Webhook (JSON)
 	if wh != "" {
 		payload := map[string]string{"content": msg, "text": msg} // 兼容 discord/dingtalk
@@ -765,63 +954,114 @@ func sendAlert(msg string) {
 }
 
 func loadGlobalConfig() {
-	var cfgs []AppConfig; db.Find(&cfgs)
+	var cfgs []AppConfig
+	db.Find(&cfgs)
 	globalConfig.Token = "default-token"
 	globalConfig.BgType = "default"
-	globalConfig.CardOpacity = 0.9 // 默认值
-	globalConfig.CardPadding = 10  // 默认值
+	globalConfig.CardOpacity = 0.9   // 默认值
+	globalConfig.CardPadding = 10    // 默认值
 	globalConfig.SiteTheme = "light" // 默认亮色
 	defaultTargets := []PingTargetConfig{{Target: "8.8.8.8:53", Alias: "Google DNS"}}
 
 	for _, c := range cfgs {
 		switch c.Key {
-		case "token": globalConfig.Token = c.Value
-		case "server_url": globalConfig.ServerURL = c.Value
-		case "tg_token": globalConfig.TGToken = c.Value
-		case "tg_chat": globalConfig.TGChatID = c.Value
-		case "webhook_url": globalConfig.WebhookURL = c.Value
-		case "site_theme": globalConfig.SiteTheme = c.Value
-		case "bg_type": globalConfig.BgType = c.Value
-		case "bg_custom_url": globalConfig.BgCustomURL = c.Value
-		case "bg_blur": globalConfig.BgBlur, _ = strconv.Atoi(c.Value)
-		case "card_opacity": globalConfig.CardOpacity, _ = strconv.ParseFloat(c.Value, 64)
-		case "card_padding": globalConfig.CardPadding, _ = strconv.Atoi(c.Value)
-		case "sys_ping_targets": 
+		case "token":
+			globalConfig.Token = c.Value
+		case "server_url":
+			globalConfig.ServerURL = c.Value
+		case "tg_token":
+			globalConfig.TGToken = c.Value
+		case "tg_chat":
+			globalConfig.TGChatID = c.Value
+		case "webhook_url":
+			globalConfig.WebhookURL = c.Value
+		case "site_theme":
+			globalConfig.SiteTheme = c.Value
+		case "bg_type":
+			globalConfig.BgType = c.Value
+		case "bg_custom_url":
+			globalConfig.BgCustomURL = c.Value
+		case "bg_blur":
+			globalConfig.BgBlur, _ = strconv.Atoi(c.Value)
+		case "card_opacity":
+			globalConfig.CardOpacity, _ = strconv.ParseFloat(c.Value, 64)
+		case "card_padding":
+			globalConfig.CardPadding, _ = strconv.Atoi(c.Value)
+		case "sys_ping_targets":
 			json.Unmarshal([]byte(c.Value), &globalConfig.PingTargets)
 		// === 更新模块 ===
-		case "update_repo": globalConfig.UpdateRepo = c.Value
-		case "update_proxy": globalConfig.UpdateProxy = c.Value
-		case "restart_cmd": globalConfig.RestartCmd = c.Value
-		case "agent_bundle_version": globalConfig.AgentBundleVersion = c.Value
+		case "update_repo":
+			globalConfig.UpdateRepo = c.Value
+		case "update_proxy":
+			globalConfig.UpdateProxy = c.Value
+		case "restart_cmd":
+			globalConfig.RestartCmd = c.Value
+		case "agent_bundle_version":
+			globalConfig.AgentBundleVersion = c.Value
 		}
 	}
-	if len(globalConfig.PingTargets) == 0 { globalConfig.PingTargets = defaultTargets }
-	if len(cfgs) == 0 { saveConfig("token", "default-token") }
+	if len(globalConfig.PingTargets) == 0 {
+		globalConfig.PingTargets = defaultTargets
+	}
+	if len(cfgs) == 0 {
+		saveConfig("token", "default-token")
+	}
 }
 
-func saveConfig(k, v string) { db.Clauses(clause.OnConflict{UpdateAll:true}).Create(&AppConfig{Key:k, Value:v}) }
+func saveConfig(k, v string) {
+	db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&AppConfig{Key: k, Value: v})
+}
 
 func dashboardHandler(c *gin.Context) {
-	s := sessions.Default(c); isAdmin := s.Get("user") != nil
-	t,_:=template.New("d").Parse(htmlDashboard)
-	sch:="http://"; if c.Request.TLS!=nil{sch="https://"}
-	
-	globalConfig.RLock(); 
-	tk:=globalConfig.Token; u:=globalConfig.ServerURL; tgt:=globalConfig.TGToken; tgc:=globalConfig.TGChatID; wh:=globalConfig.WebhookURL;
-	bgType:=globalConfig.BgType; bgUrl:=globalConfig.BgCustomURL; bgBlur:=globalConfig.BgBlur; cardOp:=globalConfig.CardOpacity; 
-	cardPad:=globalConfig.CardPadding; theme:=globalConfig.SiteTheme
-	repo:=globalConfig.UpdateRepo; proxy:=globalConfig.UpdateProxy; rCmd:=globalConfig.RestartCmd; bundle:=globalConfig.AgentBundleVersion
+	s := sessions.Default(c)
+	isAdmin := s.Get("user") != nil
+	t, _ := template.New("d").Parse(htmlDashboard)
+	sch := "http://"
+	if c.Request.TLS != nil {
+		sch = "https://"
+	}
+
+	globalConfig.RLock()
+	tk := globalConfig.Token
+	u := globalConfig.ServerURL
+	tgt := globalConfig.TGToken
+	tgc := globalConfig.TGChatID
+	wh := globalConfig.WebhookURL
+	bgType := globalConfig.BgType
+	bgUrl := globalConfig.BgCustomURL
+	bgBlur := globalConfig.BgBlur
+	cardOp := globalConfig.CardOpacity
+	cardPad := globalConfig.CardPadding
+	theme := globalConfig.SiteTheme
+	repo := globalConfig.UpdateRepo
+	proxy := globalConfig.UpdateProxy
+	rCmd := globalConfig.RestartCmd
+	bundle := globalConfig.AgentBundleVersion
 	globalConfig.RUnlock()
-	
-	if !isAdmin { tk=""; u=""; tgt=""; tgc=""; wh=""; repo=""; proxy=""; rCmd=""; bundle="" }
-	if repo == "" { repo = defaultRepo }
+
+	if !isAdmin {
+		tk = ""
+		u = ""
+		tgt = ""
+		tgc = ""
+		wh = ""
+		repo = ""
+		proxy = ""
+		rCmd = ""
+		bundle = ""
+	}
+	if repo == "" {
+		repo = defaultRepo
+	}
 
 	t.Execute(c.Writer, map[string]interface{}{
-		"BrowserURL": sch+c.Request.Host, "CustomServerURL": u, "Token": tk, "TGToken": tgt, "TGChatID": tgc, "WebhookURL": wh,
+		"BrowserURL": sch + c.Request.Host, "CustomServerURL": u, "Token": tk, "TGToken": tgt, "TGChatID": tgc, "WebhookURL": wh,
 		"DownloadURL": "/api/download", "IsAdmin": isAdmin,
-		"BgType": bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
+		// 安装命令模板：前端用它为已有节点生成命令，与后端 installCommand() 同源
+		"InstallTmpl": installCmdTmpl,
+		"BgType":      bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
 		"CardPadding": cardPad,
-		"Theme": theme,
+		"Theme":       theme,
 		// === 版本更新 ===
 		"Version": displayVersion(), "UpdateRepo": repo, "UpdateProxy": proxy,
 		"RestartCmd": rCmd, "AgentBundleVersion": bundle,
@@ -830,9 +1070,18 @@ func dashboardHandler(c *gin.Context) {
 
 func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var cnt int64; db.Model(&User{}).Count(&cnt)
-		if cnt==0{c.Redirect(302,"/setup");c.Abort();return}
-		if sessions.Default(c).Get("user")==nil{c.Redirect(302,"/login");c.Abort();return}
+		var cnt int64
+		db.Model(&User{}).Count(&cnt)
+		if cnt == 0 {
+			c.Redirect(302, "/setup")
+			c.Abort()
+			return
+		}
+		if sessions.Default(c).Get("user") == nil {
+			c.Redirect(302, "/login")
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
@@ -848,7 +1097,9 @@ func hashPwd(password string) string {
 // 安全增强: 校验密码
 func checkPwd(password, stored string) bool {
 	parts := strings.Split(stored, "$")
-	if len(parts) != 2 { return false }
+	if len(parts) != 2 {
+		return false
+	}
 	salt, _ := hex.DecodeString(parts[0])
 	expectedHash, _ := hex.DecodeString(parts[1])
 	actualHash := sha256.Sum256(append(salt, []byte(password)...))
@@ -865,11 +1116,12 @@ func runAgent(server, token, id string) {
 	hostInfo, _ := host.Info()
 	osInfo := fmt.Sprintf("%s %s", hostInfo.Platform, hostInfo.PlatformVersion)
 
-	var lastIn, lastOut uint64; var lastTime time.Time
+	var lastIn, lastOut uint64
+	var lastTime time.Time
 	currentTargets := []PingTargetConfig{{Target: "8.8.8.8:53"}}
 
 	// Ping 频率控制变量
-	const pingInterval = 20 * time.Second 
+	const pingInterval = 20 * time.Second
 
 	var latestPingResults = make(map[string]int64) // 缓存 Ping 结果
 	var lastPingTime time.Time                     // 上次 Ping 的时间
@@ -884,16 +1136,27 @@ func runAgent(server, token, id string) {
 		du, _ := disk.Usage("/")
 		nio, _ := gonet.IOCounters(false)
 
-		cVal := 0.0; if len(cIdx) > 0 { cVal = cIdx[0] }
-		curIn, curOut := uint64(0), uint64(0); if len(nio) > 0 { curIn = nio[0].BytesRecv; curOut = nio[0].BytesSent }
+		cVal := 0.0
+		if len(cIdx) > 0 {
+			cVal = cIdx[0]
+		}
+		curIn, curOut := uint64(0), uint64(0)
+		if len(nio) > 0 {
+			curIn = nio[0].BytesRecv
+			curOut = nio[0].BytesSent
+		}
 
 		now := time.Now()
 		spIn, spOut := uint64(0), uint64(0)
 		if !lastTime.IsZero() {
 			d := now.Sub(lastTime).Seconds()
 			if d > 0 {
-				if curIn >= lastIn { spIn = uint64(float64(curIn-lastIn) / d) }
-				if curOut >= lastOut { spOut = uint64(float64(curOut-lastOut) / d) }
+				if curIn >= lastIn {
+					spIn = uint64(float64(curIn-lastIn) / d)
+				}
+				if curOut >= lastOut {
+					spOut = uint64(float64(curOut-lastOut) / d)
+				}
 			}
 		}
 		lastIn, lastOut, lastTime = curIn, curOut, now
@@ -920,15 +1183,15 @@ func runAgent(server, token, id string) {
 						ms = execPing(target)
 					}
 					// 只有成功才记录
-					if ms > 0 { 
+					if ms > 0 {
 						mu.Lock()
 						tempResults[target] = ms
-						mu.Unlock() 
+						mu.Unlock()
 					}
 				}(t.Target)
 			}
 			wg.Wait()
-			
+
 			latestPingResults = tempResults
 			lastPingTime = time.Now()
 		}
@@ -948,7 +1211,7 @@ func runAgent(server, token, id string) {
 		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(d))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", token)
-		
+
 		resp, err := client.Do(req)
 
 		if err == nil {
@@ -967,7 +1230,7 @@ func runAgent(server, token, id string) {
 					if string(newStr) != string(oldStr) {
 						fmt.Printf("Config Update: Targets -> %s\n", newStr)
 						currentTargets = serverResp.PingTargets
-						lastPingTime = time.Time{} 
+						lastPingTime = time.Time{}
 					}
 				}
 
@@ -985,7 +1248,7 @@ func runAgent(server, token, id string) {
 				}
 			}
 		}
-		
+
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -1005,7 +1268,7 @@ func uninstallAgent() {
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
 		// ================= Alpine (OpenRC) 逻辑 =================
 		fmt.Println("-> 检测到 Alpine 系统，正在清理 OpenRC 服务...")
-		
+
 		exec.Command("rc-update", "del", "monitor").Run()
 		if err := os.Remove("/etc/init.d/monitor"); err == nil {
 			fmt.Println("✅ 服务脚本已删除 (/etc/init.d/monitor)")
@@ -1049,7 +1312,9 @@ func execPing(ip string) int64 {
 		cmd = exec.Command("ping", "-c", "1", "-W", "1", ip)
 	}
 	out, err := cmd.CombinedOutput()
-	if err != nil { return 0 }
+	if err != nil {
+		return 0
+	}
 	re := regexp.MustCompile(`(?i)(?:time|时间)[=<]([\d\.]+)`)
 	matches := re.FindStringSubmatch(string(out))
 	if len(matches) > 1 {
