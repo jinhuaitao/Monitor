@@ -142,25 +142,27 @@ body{
 .btn-wrap{position:relative;display:inline-flex}
 
 /* ---------- 概览 ---------- */
+/* 概览卡是"指标条"而非内容卡：高度压到 ~79px（原 118px），
+   圆角相应收到 --r-md —— 80px 高的卡片配 20px 圆角会显得过圆 */
 .wrap{max-width:1280px;margin:0 auto;padding:20px 20px 60px}
-.overview{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:14px;margin-bottom:18px}
+.overview{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:12px;margin-bottom:14px}
 .ov-card{
   position:relative;overflow:hidden;
   background:var(--glass-bg);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-  border:1px solid var(--glass-border);border-radius:var(--r-lg);padding:16px 18px;box-shadow:var(--glass-shadow);
+  border:1px solid var(--glass-border);border-radius:var(--r-md);padding:8px 12px 9px;box-shadow:var(--glass-shadow);
   transition:.28s;
 }
-.ov-card:hover{transform:translateY(-3px);box-shadow:var(--glass-shadow-hi)}
+.ov-card:hover{transform:translateY(-2px);box-shadow:var(--glass-shadow-hi)}
 .ov-card::after{
-  content:'';position:absolute;right:-18px;top:-18px;width:74px;height:74px;border-radius:50%;
+  content:'';position:absolute;right:-13px;top:-13px;width:52px;height:52px;border-radius:50%;
   background:var(--ov-accent,var(--primary));opacity:.12;
 }
-.ov-top{display:flex;align-items:center;gap:9px;margin-bottom:9px}
-.ov-ic{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:15px;background:var(--ov-accent,var(--primary));color:#fff;opacity:.92}
-.ov-label{font-size:11.5px;font-weight:700;color:var(--text-sub);letter-spacing:.4px;text-transform:uppercase}
-.ov-value{font-size:26px;font-weight:800;letter-spacing:-.8px;line-height:1.05;font-variant-numeric:tabular-nums}
-.ov-unit{font-size:13px;font-weight:600;color:var(--text-mute);margin-left:3px}
-.ov-foot{font-size:11.5px;color:var(--text-mute);margin-top:6px}
+.ov-top{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.ov-ic{width:21px;height:21px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;background:var(--ov-accent,var(--primary));color:#fff;opacity:.92}
+.ov-label{font-size:10px;font-weight:700;color:var(--text-sub);letter-spacing:.4px;text-transform:uppercase}
+.ov-value{font-size:21px;font-weight:800;letter-spacing:-.7px;line-height:1.05;font-variant-numeric:tabular-nums}
+.ov-unit{font-size:11px;font-weight:600;color:var(--text-mute);margin-left:2px}
+.ov-foot{font-size:10px;color:var(--text-mute);margin-top:2px}
 
 /* ---------- 节点 ---------- */
 .node-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:16px}
@@ -495,8 +497,8 @@ body{
   .topbar-tools{width:100%;margin-left:0;justify-content:flex-start}
   .search-box{order:3;min-width:0;flex:1}
   .wrap{padding:16px 10px 50px}
-  .overview{grid-template-columns:repeat(2,1fr);gap:10px}
-  .ov-value{font-size:22px}
+  .overview{grid-template-columns:repeat(2,1fr);gap:9px}
+  .ov-value{font-size:19px}
   .node-card{padding:var(--row-padding) 13px}
   .node-card::before{left:12px;right:12px}
   .node-card .nc-flag{width:30px;height:30px;border-radius:10px;font-size:16px}
