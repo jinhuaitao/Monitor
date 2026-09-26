@@ -121,31 +121,60 @@ install_deps() {
 download_binary() {
     ASSET_NAME="$1"
     URL=$(get_download_url "$ASSET_NAME")
+    SHA_URL=$(get_download_url "${ASSET_NAME}.sha256")
     printf '%b\n' "${BLUE}下载地址: $URL${NC}"
 
-    if ! curl -fL --progress-bar --connect-timeout 20 --retry 2 -o "$BIN_PATH" "$URL"; then
-        printf '%b\n' "${RED}下载失败：请检查网络，或确认该架构的资源是否存在。${NC}"
-        printf '%b\n' "${YELLOW}国内网络可在脚本顶部设置 MIRROR=\"https://ghfast.top/\" 后重试。${NC}"
-        rm -f "$BIN_PATH"
-        return 1
-    fi
-
-    # 校验完整性（Release 中带有 .sha256 资源）
-    EXPECT=$(curl -fsSL --connect-timeout 20 "$(get_download_url "${ASSET_NAME}.sha256")" 2>/dev/null | awk '{print $1}')
-    if [ -n "$EXPECT" ]; then
-        ACTUAL=$(sha256_of "$BIN_PATH")
-        if [ -n "$ACTUAL" ] && [ "$EXPECT" != "$ACTUAL" ]; then
-            printf '%b\n' "${RED}SHA256 校验失败：文件不完整或被篡改，已放弃安装。${NC}"
-            rm -f "$BIN_PATH"
-            return 1
+    ATTEMPT=1
+    while [ "$ATTEMPT" -le 3 ]; do
+        if [ "$ATTEMPT" -gt 1 ]; then
+            # 发布新版本时 GitHub 会逐个覆盖 Release 资源，需要几秒才能恢复一致
+            printf '%b\n' "${YELLOW}第 ${ATTEMPT} 次重试...${NC}"
+            if [ "$ATTEMPT" -eq 2 ]; then sleep 3; else sleep 8; fi
         fi
-        printf '%b\n' "${GREEN}SHA256 校验通过。${NC}"
-    else
-        printf '%b\n' "${YELLOW}未获取到校验文件，跳过完整性校验。${NC}"
-    fi
 
-    chmod +x "$BIN_PATH"
-    return 0
+        if ! curl -fL --progress-bar --connect-timeout 20 --retry 2 -o "$BIN_PATH" "$URL"; then
+            printf '%b\n' "${RED}下载失败：请检查网络，或确认该架构的资源是否存在。${NC}"
+            rm -f "$BIN_PATH"
+            ATTEMPT=$((ATTEMPT + 1))
+            continue
+        fi
+
+        # 校验完整性（Release 中带有 .sha256 资源）
+        EXPECT=$(curl -fsSL --connect-timeout 20 "$SHA_URL" 2>/dev/null | awk '{print $1}')
+        if [ -z "$EXPECT" ]; then
+            printf '%b\n' "${YELLOW}未获取到校验文件，跳过完整性校验。${NC}"
+            chmod +x "$BIN_PATH"
+            return 0
+        fi
+
+        ACTUAL=$(sha256_of "$BIN_PATH")
+        if [ -z "$ACTUAL" ]; then
+            printf '%b\n' "${YELLOW}系统缺少 sha256 工具，跳过完整性校验。${NC}"
+            chmod +x "$BIN_PATH"
+            return 0
+        fi
+
+        if [ "$EXPECT" = "$ACTUAL" ]; then
+            printf '%b\n' "${GREEN}SHA256 校验通过。${NC}"
+            chmod +x "$BIN_PATH"
+            return 0
+        fi
+
+        # 校验不一致：打印细节，便于区分"网络改写"与"Release 正在更新"
+        SIZE=$(wc -c < "$BIN_PATH" 2>/dev/null)
+        printf '%b\n' "${YELLOW}校验不一致（第 ${ATTEMPT} 次）${NC}"
+        printf '%b\n' "  期望: ${EXPECT}"
+        printf '%b\n' "  实际: ${ACTUAL}"
+        printf '%b\n' "  大小: ${SIZE} 字节"
+        rm -f "$BIN_PATH"
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+
+    printf '%b\n' "${RED}SHA256 校验连续 3 次失败，已放弃安装。${NC}"
+    printf '%b\n' "${YELLOW}常见原因：${NC}"
+    printf '%b\n' "  1) 仓库正在发布新版本，GitHub 覆盖 Release 资源需数秒 —— 稍等 1 分钟后重试"
+    printf '%b\n' "  2) 网络中间层改写了下载内容 —— 可在脚本顶部设置 MIRROR=\"https://ghfast.top/\" 后重试"
+    return 1
 }
 
 # --- 辅助函数：等待旧进程完全退出（避免覆盖正在运行的二进制） ---
@@ -183,10 +212,14 @@ do_install() {
     fi
 
     if ! download_binary "$(get_asset_name)"; then
+        # 失败必须回滚并重新拉起服务，否则一次失败的更新会把面板直接留在停机状态
         if [ -f "$BIN_PATH.bak" ]; then
             mv -f "$BIN_PATH.bak" "$BIN_PATH"
+            chmod +x "$BIN_PATH"
             printf '%b\n' "${YELLOW}已回滚到旧版本。${NC}"
         fi
+        do_start >/dev/null 2>&1
+        printf '%b\n' "${GREEN}已重新拉起原服务，面板保持可用。${NC}"
         return 1
     fi
     printf '%b\n' "${GREEN}下载并授权成功。${NC}"
