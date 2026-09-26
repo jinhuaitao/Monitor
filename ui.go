@@ -170,19 +170,20 @@ body{
 
 /* 卡片本体：玻璃底 + 内高光 + 三层阴影，hover 时抬升并透出主色描边。
    min-width:0 是必需的：栅格项默认 min-width:auto，副信息行里的版本号
-   又是 flex-shrink:0，两者叠加会让卡片的最小内容宽度顶破窄屏视口 */
+   又是 flex-shrink:0，两者叠加会让卡片的最小内容宽度顶破窄屏视口。
+   纵向内边距跟随「卡片间距」设置等比缩放（×0.7），保持紧凑又不失可调性 */
 .node-card{
   position:relative;isolation:isolate;min-width:0;
   background:var(--glass-bg);
   backdrop-filter:blur(16px) saturate(170%);-webkit-backdrop-filter:blur(16px) saturate(170%);
   border:1px solid var(--glass-border);border-radius:var(--r-lg);
-  padding:var(--row-padding) 15px;
+  padding:calc(var(--row-padding) * .7) 14px;
   box-shadow:var(--glass-shadow), inset 0 1px 0 rgba(255,255,255,.6);
   transition:transform .28s cubic-bezier(.2,.7,.3,1),box-shadow .28s,border-color .28s,opacity .3s;
 }
 /* 顶部状态光带：在线=绿 / 离线=红，一眼判读节点死活 */
 .node-card::before{
-  content:'';position:absolute;top:0;left:16px;right:16px;height:2px;border-radius:0 0 4px 4px;
+  content:'';position:absolute;top:0;left:14px;right:14px;height:2px;border-radius:0 0 4px 4px;
   background:linear-gradient(90deg,transparent,var(--success) 20%,var(--success) 80%,transparent);
   box-shadow:0 0 14px rgba(16,185,129,.45);opacity:.9;pointer-events:none;
   transition:background .45s,box-shadow .45s,opacity .45s;
@@ -212,12 +213,12 @@ body{
 [data-theme="dark"] .node-card{box-shadow:var(--glass-shadow), inset 0 1px 0 rgba(255,255,255,.06)}
 [data-theme="dark"] .node-card:hover{box-shadow:var(--glass-shadow-hi), inset 0 1px 0 rgba(255,255,255,.09)}
 
-.nc-top{display:flex;align-items:center;gap:10px}
+.nc-top{display:flex;align-items:center;gap:9px}
 .nc-flag{font-size:22px;line-height:1;filter:saturate(115%)}
 /* 旗帜徽标：圆角方块承载，hover 微缩放，离线去色；点击等同打开详情 */
 .node-card .nc-flag{
-  width:34px;height:34px;flex-shrink:0;border-radius:11px;cursor:pointer;
-  display:flex;align-items:center;justify-content:center;font-size:18px;
+  width:25px;height:25px;flex-shrink:0;border-radius:8px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;font-size:14px;
   background:linear-gradient(155deg,var(--soft-2),var(--soft));
   border:1px solid var(--soft-2);box-shadow:inset 0 1px 0 rgba(255,255,255,.55);
   transition:transform .3s cubic-bezier(.2,.8,.3,1.3),border-color .3s;
@@ -227,29 +228,30 @@ body{
 .node-card.is-off .nc-flag{filter:grayscale(.55) saturate(80%);opacity:.85}
 .nc-id{min-width:0;flex:1}
 .nc-name{
-  font-weight:700;font-size:15px;letter-spacing:-.2px;cursor:pointer;display:block;
+  font-weight:700;font-size:13.5px;line-height:1.15;letter-spacing:-.2px;cursor:pointer;display:block;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color .2s;
 }
 .node-card:hover .nc-name{color:var(--primary)}
 .nc-name:hover{color:var(--primary)}
 /* 副信息行：左侧「系统 · IP」占据剩余空间并可截断，版本号被顶到最右侧，
-   于是所有卡片的版本号右边缘对齐成一列 —— 位置固定，不随系统名长短漂移 */
-.nc-sub{display:flex;align-items:baseline;gap:8px;font-size:11.5px;color:var(--text-mute);margin-top:2px;font-family:'Menlo',monospace;letter-spacing:-.1px}
+   于是所有卡片的版本号右边缘对齐成一列 —— 位置固定，不随系统名长短漂移。
+   显式写 line-height：否则行高由字体默认值决定，压缩高度时不可控 */
+.nc-sub{display:flex;align-items:baseline;gap:6px;font-size:10.5px;line-height:1.15;color:var(--text-mute);margin-top:1px;font-family:'Menlo',monospace;letter-spacing:-.1px}
 .nc-sub-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nc-sub-ver{flex:0 0 auto;font-size:11px;opacity:.8}
-.nc-right{display:flex;align-items:center;gap:7px;flex-shrink:0}
+.nc-sub-ver{flex:0 0 auto;font-size:10px;opacity:.8}
+.nc-right{display:flex;align-items:center;gap:6px;flex-shrink:0}
 /* 待更新徽标：常驻占位靠 .on 切换显隐，位于状态胶囊左侧，胶囊始终贴右不位移 */
 .nc-upd{
-  display:none;align-items:center;padding:4px 9px;border-radius:99px;white-space:nowrap;
-  font-size:10.5px;font-weight:700;color:var(--primary);
+  display:none;align-items:center;padding:3px 8px;border-radius:99px;white-space:nowrap;
+  font-size:9.5px;font-weight:700;color:var(--primary);
   background:rgba(99,102,241,.12);border:1px solid rgba(99,102,241,.26);
 }
 .nc-upd.on{display:inline-flex;animation:blink 1.8s ease-in-out infinite}
 .status-pill{
-  display:inline-flex;align-items:center;gap:6px;padding:5px 11px 5px 9px;border-radius:99px;
-  font-size:11px;font-weight:700;letter-spacing:.3px;
+  display:inline-flex;align-items:center;gap:5px;padding:3px 9px 3px 7px;border-radius:99px;
+  font-size:10px;font-weight:700;letter-spacing:.3px;
 }
-.status-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;position:relative;flex-shrink:0}
+.status-pill .dot{width:5px;height:5px;border-radius:50%;background:currentColor;position:relative;flex-shrink:0}
 .status-pill.on{color:var(--success);background:linear-gradient(135deg,rgba(16,185,129,.17),rgba(16,185,129,.06));border:1px solid rgba(16,185,129,.28)}
 .status-pill.on .dot{box-shadow:0 0 8px var(--success)}
 .status-pill.on .dot::after{content:'';position:absolute;inset:-4px;border-radius:50%;background:currentColor;animation:ripple 1.9s ease-out infinite}
@@ -258,34 +260,34 @@ body{
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.45}}
 
 /* 指标磁贴：三格等宽，各自带底色与描边，数值/色点/进度条颜色随负载联动 */
-.nc-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:11px 0 10px}
+.nc-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:6px 0 5px}
 .metric{
-  min-width:0;padding:8px 10px 9px;border-radius:var(--r-sm);
+  min-width:0;padding:5px 9px 6px;border-radius:var(--r-sm);
   background:var(--soft);border:1px solid var(--soft-2);
   transition:background .25s,border-color .25s,transform .25s;
 }
 .metric:hover{background:var(--soft-2);border-color:rgba(99,102,241,.22);transform:translateY(-1px)}
-.m-head{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px}
-.m-label{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;color:var(--text-sub);letter-spacing:.5px}
-.m-dot{width:6px;height:6px;border-radius:2px;background:var(--text-mute);flex-shrink:0;transition:background .5s}
-.m-val{font-size:13px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.3px;transition:color .5s}
-.bar{height:5px;border-radius:99px;background:var(--track);overflow:hidden}
+.m-head{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:3px}
+.m-label{display:inline-flex;align-items:center;gap:4px;font-size:9.5px;line-height:1.15;font-weight:700;color:var(--text-sub);letter-spacing:.5px}
+.m-dot{width:5px;height:5px;border-radius:2px;background:var(--text-mute);flex-shrink:0;transition:background .5s}
+.m-val{font-size:12px;line-height:1.15;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.3px;transition:color .5s}
+.bar{height:4px;border-radius:99px;background:var(--track);overflow:hidden}
 .bar-fill{height:100%;border-radius:99px;transition:width .7s cubic-bezier(.4,0,.2,1),background .5s,box-shadow .5s;min-width:2px}
 
 /* 页脚：固定四格（下行 / 上行 / 运行时长 / 延迟），胶囊按内容宽度、两端均匀铺开。
    用 grid 固定轨道而不是 flex-wrap —— 无论数值多长、延迟有没有数据，
    都稳定排在同一行，卡片高度恒定，2s 刷新时不会忽高忽低。
    最后一格若写成 1fr 会被拉成一条几乎空白的长条，故四格都用 auto */
-.nc-foot{display:grid;grid-template-columns:repeat(4,auto);justify-content:space-between;gap:7px;align-items:center;padding-top:9px;position:relative}
+.nc-foot{display:grid;grid-template-columns:repeat(4,auto);justify-content:space-between;gap:6px;align-items:center;padding-top:6px;position:relative}
 .nc-foot::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--soft-2) 10%,var(--soft-2) 90%,transparent)}
 .chip{
   display:inline-flex;align-items:center;justify-content:center;gap:4px;min-width:0;
-  font-size:11px;font-weight:600;color:var(--text-sub);
-  background:var(--soft);border:1px solid var(--soft-2);border-radius:8px;padding:4px 8px;
+  font-size:10px;line-height:1.35;font-weight:600;color:var(--text-sub);
+  background:var(--soft);border:1px solid var(--soft-2);border-radius:7px;padding:3px 7px;
   font-variant-numeric:tabular-nums;transition:.22s;
 }
 .chip:hover{background:var(--soft-2);border-color:rgba(99,102,241,.25);color:var(--text-main)}
-.chip b{color:var(--text-main);font-weight:700;font-family:'Menlo',monospace;font-size:10.5px}
+.chip b{color:var(--text-main);font-weight:700;font-family:'Menlo',monospace;font-size:9.5px}
 /* 文本包一层，flex 容器里才能生效省略号（直接放在 .chip 上无效） */
 .chip-txt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
@@ -298,13 +300,13 @@ body{
 }
 .node-grid.list-view .nc-top{grid-area:head}
 .node-grid.list-view .nc-metrics{grid-area:metrics;margin:0}
-.node-grid.list-view .nc-foot{grid-area:foot;padding-top:10px;justify-content:flex-start;gap:8px}
+.node-grid.list-view .nc-foot{grid-area:foot;padding-top:6px;justify-content:flex-start;gap:6px}
 .empty{
   grid-column:1/-1;text-align:center;padding:64px 20px;color:var(--text-sub);
   background:var(--glass-bg);border-radius:var(--r-lg);backdrop-filter:blur(14px);border:1px dashed var(--glass-border);
 }
 .empty-ic{font-size:38px;margin-bottom:12px;opacity:.6}
-.skel{height:120px;border-radius:var(--r-lg);background:linear-gradient(90deg,var(--soft) 25%,var(--soft-2) 37%,var(--soft) 63%);background-size:400% 100%;animation:sheen 1.4s ease infinite}
+.skel{height:104px;border-radius:var(--r-lg);background:linear-gradient(90deg,var(--soft) 25%,var(--soft-2) 37%,var(--soft) 63%);background-size:400% 100%;animation:sheen 1.4s ease infinite}
 @keyframes sheen{0%{background-position:100% 50%}100%{background-position:0 50%}}
 
 /* ---------- 弹窗 ---------- */
@@ -487,7 +489,7 @@ body{
   .charts-row{flex-direction:column}
   .chart-box{height:170px}
   /* 窄屏下列表视图回退为竖向堆叠 */
-  .node-grid.list-view .node-card{grid-template-columns:1fr;grid-template-areas:"head" "metrics" "foot";row-gap:11px}
+  .node-grid.list-view .node-card{grid-template-columns:1fr;grid-template-areas:"head" "metrics" "foot";row-gap:7px}
   .node-grid.list-view .nc-metrics{margin:0}
 }
 @media (max-width:640px){
@@ -499,15 +501,16 @@ body{
   .wrap{padding:16px 10px 50px}
   .overview{grid-template-columns:repeat(2,1fr);gap:9px}
   .ov-value{font-size:19px}
-  .node-card{padding:var(--row-padding) 13px}
-  .node-card::before{left:12px;right:12px}
-  .node-card .nc-flag{width:30px;height:30px;border-radius:10px;font-size:16px}
-  .nc-metrics{gap:7px}
-  .metric{padding:7px 9px 8px}
-  .m-val{font-size:12.5px}
+  /* 卡片整体压扁后，窄屏覆盖值必须同步下调：
+     否则这些「旧的大尺寸」会反过来把卡片撑得比基准值还高 */
+  .node-card{padding:calc(var(--row-padding) * .6) 12px}
+  .node-card::before{left:11px;right:11px}
+  .nc-metrics{gap:6px}
+  .metric{padding:5px 8px 6px}
+  .m-val{font-size:11.5px}
   .nc-foot{gap:5px}
-  .chip{font-size:10.5px;padding:3px 7px}
-  .chip b{font-size:10px}
+  .chip{font-size:9.5px;padding:3px 6px}
+  .chip b{font-size:9px}
   .input-text{font-size:16px}
   .modal{max-height:94vh}
   .node-row,.upd-node{flex-direction:column;align-items:stretch}
