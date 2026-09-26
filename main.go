@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
-	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -22,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gin-contrib/sessions"
@@ -37,31 +35,6 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
-
-// ================= 版本与更新 =================
-
-// version 由编译时注入：go build -ldflags "-X main.version=v1.0.0"
-var version = "dev"
-
-// 更新源：GitHub Release 的固定下载地址，资产命名为 monitor-<GOOS>-<GOARCH>
-const updateBaseURL = "https://github.com/jinhuaitao/Monitor/releases/latest/download"
-
-// 更新检查用的仓库 API
-const updateRepoAPI = "https://api.github.com/repos/jinhuaitao/Monitor/releases/latest"
-
-func updateURLFor(base, goos, arch string) string {
-	if base == "" { base = updateBaseURL }
-	return fmt.Sprintf("%s/monitor-%s-%s", base, goos, arch)
-}
-
-// 候选下载地址：优先 monitor-<系统>-<架构>，兼容不带前缀的 <系统>-<架构>
-func candidateUpdateURLs(base, goos, arch string) []string {
-	if base == "" { base = updateBaseURL }
-	return []string{
-		fmt.Sprintf("%s/monitor-%s-%s", base, goos, arch),
-		fmt.Sprintf("%s/%s-%s", base, goos, arch),
-	}
-}
 
 // ================= 全局配置 =================
 
@@ -117,7 +90,6 @@ type Node struct {
 	Denied      bool   `gorm:"default:false"`
 	CountryCode string 
 	CreatedAt   time.Time // [新增] 用于记录添加时间
-	UpdatePending bool `gorm:"default:false"` // [新增] 待更新标记，Agent 上报时下发更新指令
 }
 
 type MonitorHistory struct {
@@ -151,14 +123,11 @@ type SystemStatus struct {
 	PingResults     map[string]int64   `json:"ping_results"`
 	LastUpdate      time.Time          `json:"last_update"`
 	InstallTime     int64              `json:"install_time"` // [新增] 用于前端排序
-	UpdatePending   bool               `json:"update_pending"` // [新增] 该节点是否已收到更新指令
 }
 
 type AgentResponse struct {
 	Status      string             `json:"status"`
 	PingTargets []PingTargetConfig `json:"ping_targets"`
-	Update      bool               `json:"update,omitempty"`      // [新增] true 时 Agent 执行自更新
-	UpdateBase  string             `json:"update_base,omitempty"` // [新增] 更新地址前缀（留空则用内置默认值）
 }
 
 // ================= HTML 模版 =================
@@ -449,7 +418,6 @@ const htmlDashboard = `
                     <button class="sidebar-btn" onclick="switchTab('appearance')">🎨 外观设置</button>
                     <button class="sidebar-btn" onclick="switchTab('install')">➕ 添加节点</button>
                     <button class="sidebar-btn" onclick="switchTab('alert')">🔔 告警通知</button>
-                    <button class="sidebar-btn" onclick="switchTab('update')">🔄 版本更新</button>
                 </div>
 
                 <div class="content-area">
@@ -550,35 +518,6 @@ const htmlDashboard = `
                             <button class="btn-primary" style="background:linear-gradient(135deg, #10b981, #34d399);box-shadow:0 4px 10px rgba(16, 185, 129, 0.2);" onclick="testAlert()">发送测试</button>
                         </div>
                     </div>
-
-                    <div id="tab-update" class="tab-content">
-                        <h4 style="margin-top:0;margin-bottom:20px;font-size:16px;">版本更新</h4>
-
-                        <div style="background:rgba(128,128,128,0.05); padding:15px; border-radius:12px; border:1px solid rgba(128,128,128,0.1); margin-bottom:15px;">
-                            <div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:10px;">
-                                <span style="color:var(--text-sub)">当前版本</span><b>{{ .Version }}</b>
-                            </div>
-                            <div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:10px;">
-                                <span style="color:var(--text-sub)">运行架构</span><b>{{ .Arch }}</b>
-                            </div>
-                            <div style="display:flex;justify-content:space-between;font-size:14px;">
-                                <span style="color:var(--text-sub)">最新版本</span><b id="latestVersionText">未检查</b>
-                            </div>
-                        </div>
-
-                        <div style="font-size:13px; color:var(--text-sub); margin-bottom:15px; padding:8px; background:rgba(79, 70, 229, 0.05); border-radius:8px; border:1px solid rgba(79, 70, 229, 0.1);">
-                            💡 更新源：{{ .UpdateBase }}/monitor-&lt;系统&gt;-&lt;架构&gt;（如 <b>monitor-linux-amd64</b> / <b>monitor-linux-arm64</b>）。<br>
-                            · 更新服务端：下载新版本替换自身并<b>立即重启</b>（旧文件会备份为 <b>monitor.bak</b>）。<br>
-                            · 更新客户端：向 Agent 下发指令，Agent 下次上报时自动下载替换并重启。
-                        </div>
-
-                        <div style="display:flex;gap:10px;flex-wrap:wrap;">
-                            <button class="btn-primary" onclick="checkUpdate()">🔍 检查最新版本</button>
-                            <button class="btn-primary" style="background:linear-gradient(135deg, #10b981, #34d399);box-shadow:0 4px 10px rgba(16, 185, 129, 0.2);" onclick="confirmUpdateServer()">⬆️ 更新服务端</button>
-                            <button class="btn-primary" style="background:linear-gradient(135deg, #f59e0b, #fbbf24);box-shadow:0 4px 10px rgba(245, 158, 11, 0.2);" onclick="updateAllClients()">🖥️ 更新全部客户端</button>
-                        </div>
-                        <div id="updateStatus" style="margin-top:15px;font-size:13px;color:var(--text-sub);"></div>
-                    </div>
                 </div>
             </div>
         </div>
@@ -618,18 +557,6 @@ const htmlDashboard = `
             <div style="display:flex;justify-content:center;gap:15px">
                 <button class="btn-outline" style="min-width:100px" onclick="closeConfirm()">取消</button>
                 <button class="btn-primary" style="background:var(--danger);box-shadow:0 4px 10px rgba(239, 68, 68, 0.2);min-width:100px" onclick="executeDelete()">确定删除</button>
-            </div>
-        </div>
-    </div>
-
-    <div class="modal-overlay" id="updateServerModal">
-        <div class="modal" style="height:auto;max-height:auto;max-width:400px;text-align:center;padding:30px;">
-            <div style="width:60px;height:60px;background:rgba(16, 185, 129, 0.1);color:var(--success);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;font-size:28px;">⬆️</div>
-            <h3 style="margin-top:0;margin-bottom:15px;font-size:18px;">更新服务端?</h3>
-            <p style="color:var(--text-sub);margin-bottom:25px;font-size:14px;line-height:1.6;">将从 GitHub Release 下载 <b>最新版本</b> 替换当前程序并重启。<br>旧版本会备份为 <b>monitor.bak</b>，更新过程中面板会短暂中断。</p>
-            <div style="display:flex;justify-content:center;gap:15px">
-                <button class="btn-outline" style="min-width:100px" onclick="closeUpdateServer()">取消</button>
-                <button class="btn-primary" style="background:var(--success);border-color:var(--success);min-width:100px" onclick="executeUpdateServer()">立即更新</button>
             </div>
         </div>
     </div>
@@ -902,13 +829,12 @@ const htmlDashboard = `
                 var cmd = "curl -L -o monitor " + serverAddr + "/api/download && chmod +x monitor && ./monitor -mode install -server " + serverAddr + " -token " + currentToken + " -id " + id;
                 var safeCmd = cmd.replace(/"/g, '&quot;');
 
-                html+='<div class="node-row"><div style="flex:1;font-weight:600">'+(escapeHtml(s.name)||s.agent_id)+'<div style="font-size:12px;color:var(--text-sub);font-weight:400">'+s.agent_id+(s.update_pending?' <span style="color:#f59e0b;font-weight:600">· 更新中</span>':'')+'</div></div>' +
+                html+='<div class="node-row"><div style="flex:1;font-weight:600">'+(escapeHtml(s.name)||s.agent_id)+'<div style="font-size:12px;color:var(--text-sub);font-weight:400">'+s.agent_id+'</div></div>' +
                 '<div style="display:flex;gap:8px;align-items:center"><button class="btn-outline" style="opacity:'+op+'" onclick="toggleHide(\''+id+'\')">👁️</button>' +
                 '<input type="number" class="input-text" style="width:60px;padding:8px;text-align:center" value="'+sort+'" placeholder="排序" id="s-'+id+'">' +
                 '<input type="text" class="input-text" style="width:120px;padding:8px" value="'+(escapeHtml(s.name)||'')+'" placeholder="设置别名" id="n-'+id+'">' +
                 '<button class="btn-primary btn-sm" onclick="saveNode(\''+id+'\')">保存</button>' +
                 '<button class="btn-outline btn-sm" onclick="copyTextToClipboard(\'' + safeCmd + '\')" title="复制安装命令">📋</button>' + 
-                '<button class="btn-outline btn-sm" onclick="updateNode(\''+id+'\')" title="更新该节点的客户端">🔄</button>' + 
                 '<button class="btn-del" onclick="deleteNode(\''+id+'\')">🗑️</button></div></div>';
             });
             el.innerHTML = html;
@@ -940,39 +866,6 @@ const htmlDashboard = `
     
     function saveAlert() { var t = document.getElementById('tgToken').value; var c = document.getElementById('tgChat').value; var w = document.getElementById('webhookUrl').value; fetch('/api/settings/alert', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'token='+encodeURIComponent(t)+'&chat='+encodeURIComponent(c)+'&webhook='+encodeURIComponent(w)}).then(function(){showToast('告警配置已保存');}); }
     function testAlert() { fetch('/api/settings/test_alert', {method:'POST'}).then(function(){showToast('测试消息已发送');}); }
-
-    // ===== 版本更新相关 =====
-    function setUpdateStatus(t) { var el = document.getElementById('updateStatus'); if(el) el.innerText = t; }
-    function checkUpdate() {
-        setUpdateStatus('正在检查最新版本...');
-        fetch('/api/settings/check_update').then(function(r){return r.json()}).then(function(d){
-            var el = document.getElementById('latestVersionText');
-            if(d && d.latest) { el.innerText = d.latest; setUpdateStatus('检查完成' + (d.error ? ('（部分信息获取失败: ' + d.error + '）') : '')); }
-            else { el.innerText = '获取失败'; setUpdateStatus('获取最新版本失败: ' + ((d && d.error) || '未知错误')); }
-        }).catch(function(e){ setUpdateStatus('检查失败: ' + e); });
-    }
-    function confirmUpdateServer() { document.getElementById('updateServerModal').classList.add('open'); }
-    function closeUpdateServer() { document.getElementById('updateServerModal').classList.remove('open'); }
-    function executeUpdateServer() {
-        closeUpdateServer();
-        setUpdateStatus('正在下载新版本，完成后服务端会自动重启...');
-        fetch('/api/settings/update_server', {method:'POST'}).then(function(r){return r.json()}).then(function(d){
-            if(d && d.status === 'error') { setUpdateStatus('更新失败: ' + (d.msg || '未知错误')); return; }
-            setUpdateStatus('更新完成，服务端正在重启，页面将自动刷新...');
-            setTimeout(function(){ location.reload(); }, 5000);
-        }).catch(function(){
-            setUpdateStatus('服务端正在重启，页面将自动刷新...');
-            setTimeout(function(){ location.reload(); }, 6000);
-        });
-    }
-    function updateAllClients() {
-        fetch('/api/settings/update_client', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id=all'})
-        .then(function(){ showToast('🔄 已向全部节点下发更新指令'); loadNodeList(); });
-    }
-    function updateNode(id) {
-        fetch('/api/settings/update_client', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+encodeURIComponent(id)})
-        .then(function(){ showToast('🔄 更新指令已下发，Agent 将在数秒内完成更新'); loadNodeList(); });
-    }
     
     function loadGlobalTargets() { if(!isAdmin) return; fetch('/api/settings/get_global_targets').then(function(r){return r.json()}).then(function(data){ currentTargets = data || []; renderTargets(); }); }
     function renderTargets() { var html = ''; if(currentTargets.length === 0) html = '<div style="text-align:center;color:var(--text-sub);padding:30px;background:rgba(128,128,128,0.02);border-radius:12px;">暂无监控目标</div>'; currentTargets.forEach(function(t, idx){ var display = t.alias ? (escapeHtml(t.alias) + ' <span style="color:var(--text-sub);font-size:12px;margin-left:5px">(' + escapeHtml(t.target) + ')</span>') : escapeHtml(t.target); html += '<div class="target-item"><div style="flex:1;">' + display + '</div><button class="btn-del" onclick="removeTarget(' + idx + ')">&times;</button></div>'; }); document.getElementById('targetList').innerHTML = html; }
@@ -1336,13 +1229,6 @@ func runServer(port string) {
 					c.JSON(200, AgentResponse{Status: "stop"})
 					return
 				}
-
-				// [新增] 该节点是否待更新：下发一次指令后立即清除标记，避免重复更新
-				updateNow := node.UpdatePending
-				if updateNow {
-					db.Model(&Node{}).Where("agent_id=?", s.AgentID).Update("update_pending", false)
-					fmt.Printf(">> 向节点 %s 下发更新指令\n", s.AgentID)
-				}
 				
 				if node.CountryCode == "" {
 					go func(aid, ip string) {
@@ -1374,7 +1260,7 @@ func runServer(port string) {
 				s.PingTargets = targets 
 				
 				cacheMutex.Lock(); statusCache[s.AgentID]=s; cacheMutex.Unlock()
-				c.JSON(200, AgentResponse{Status: "ok", PingTargets: targets, Update: updateNow, UpdateBase: updateBaseURL})
+				c.JSON(200, AgentResponse{Status: "ok", PingTargets: targets})
 			}
 		})
 
@@ -1400,7 +1286,6 @@ func runServer(port string) {
 					v.SortOrder = n.SortOrder
 					v.CountryCode = n.CountryCode
 					v.InstallTime = n.CreatedAt.Unix() // [新增] 注入安装时间戳
-					v.UpdatePending = n.UpdatePending  // [新增] 更新状态
 					res[n.AgentID] = v
 				} else {
 					// 3. 如果缓存没有（新建未连接），构造一个“待机”状态
@@ -1413,7 +1298,6 @@ func runServer(port string) {
 						OS:          "等待接入...", 
 						LastUpdate:  time.Time{}, // 零值，前端判定为离线
 						InstallTime: n.CreatedAt.Unix(), // [新增] 注入安装时间戳
-						UpdatePending: n.UpdatePending, // [新增] 更新状态
 					}
 				}
 			}
@@ -1576,72 +1460,6 @@ func runServer(port string) {
 				c.Status(200)
 			})
 
-			// [新增] 检查 GitHub 上的最新版本号
-			auth.GET("/settings/check_update", func(c *gin.Context) {
-				client := &http.Client{Timeout: 8 * time.Second}
-				req, err := http.NewRequest("GET", updateRepoAPI, nil)
-				if err != nil { c.JSON(200, gin.H{"latest": "", "current": version, "error": err.Error()}); return }
-				req.Header.Set("Accept", "application/vnd.github+json")
-				req.Header.Set("User-Agent", "hub-monitor")
-
-				resp, err := client.Do(req)
-				if err != nil { c.JSON(200, gin.H{"latest": "", "current": version, "error": err.Error()}); return }
-				defer resp.Body.Close()
-
-				var rel struct {
-					TagName string `json:"tag_name"`
-					Name    string `json:"name"`
-				}
-				json.NewDecoder(resp.Body).Decode(&rel)
-				latest := rel.TagName
-				if latest == "" { latest = rel.Name }
-
-				c.JSON(200, gin.H{
-					"latest":  latest,
-					"current": version,
-					"url":     updateURLFor("", runtime.GOOS, runtime.GOARCH),
-				})
-			})
-
-			// [新增] 服务端自更新：下载 -> 替换 -> 重启
-			auth.POST("/settings/update_server", func(c *gin.Context) {
-				urls := candidateUpdateURLs("", runtime.GOOS, runtime.GOARCH)
-				fmt.Println(">> 开始更新服务端:", urls[0])
-
-				newPath, err := downloadUpdateFile(urls)
-				if err != nil {
-					fmt.Println(">> 更新失败:", err)
-					c.JSON(500, gin.H{"status": "error", "msg": err.Error()})
-					return
-				}
-
-				c.JSON(200, gin.H{"status": "ok", "msg": "新版本已就绪，正在重启"})
-				if f, ok := c.Writer.(http.Flusher); ok { f.Flush() }
-
-				// 等响应发完再替换自身并重启
-				go func() {
-					time.Sleep(500 * time.Millisecond)
-					if err := applyUpdate(newPath); err != nil {
-						fmt.Println(">> 重启失败:", err)
-					}
-				}()
-			})
-
-			// [新增] 下发客户端更新指令（id=all 表示全部节点）
-			auth.POST("/settings/update_client", func(c *gin.Context) {
-				id := c.PostForm("id")
-				if id == "" || id == "all" {
-					res := db.Model(&Node{}).Where("denied = ?", false).Update("update_pending", true)
-					c.JSON(200, gin.H{"status": "ok", "count": res.RowsAffected})
-					return
-				}
-				var cnt int64
-				db.Model(&Node{}).Where("agent_id = ?", id).Count(&cnt)
-				if cnt == 0 { c.JSON(404, gin.H{"status": "error", "msg": "节点不存在"}); return }
-				db.Model(&Node{}).Where("agent_id = ?", id).Update("update_pending", true)
-				c.JSON(200, gin.H{"status": "ok", "count": int64(1)})
-			})
-
 			// 保存外观配置（增加 padding 参数）
 			auth.POST("/settings/appearance", func(c *gin.Context) {
 				t := c.PostForm("type")
@@ -1765,7 +1583,6 @@ func dashboardHandler(c *gin.Context) {
 		"BgType": bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
 		"CardPadding": cardPad,
 		"Theme": theme,
-		"Version": version, "Arch": runtime.GOOS + "-" + runtime.GOARCH, "UpdateBase": updateBaseURL,
 	})
 }
 
@@ -1794,93 +1611,6 @@ func checkPwd(password, stored string) bool {
 	expectedHash, _ := hex.DecodeString(parts[1])
 	actualHash := sha256.Sum256(append(salt, []byte(password)...))
 	return subtle.ConstantTimeCompare(expectedHash, actualHash[:]) == 1
-}
-
-// ================= 自动更新 =================
-
-// 当前可执行文件的绝对路径（解析软链接）
-func currentBinPath() string {
-	p, err := os.Executable()
-	if err != nil { p = os.Args[0] }
-	if abs, err := filepath.Abs(p); err == nil { return abs }
-	return p
-}
-
-// 依次尝试候选地址，返回下载成功的临时文件路径
-func downloadUpdateFile(urls []string) (string, error) {
-	var lastErr error
-	for _, u := range urls {
-		p, err := downloadToTemp(u)
-		if err == nil { return p, nil }
-		fmt.Printf(">> 下载失败(%s): %v\n", u, err)
-		lastErr = err
-	}
-	if lastErr == nil { lastErr = fmt.Errorf("没有可用的下载地址") }
-	return "", lastErr
-}
-
-// 下载新版本到当前程序所在目录的临时文件，返回临时文件路径
-func downloadToTemp(url string) (string, error) {
-	binPath := currentBinPath()
-	dir := filepath.Dir(binPath)
-
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(url)
-	if err != nil { return "", fmt.Errorf("下载失败: %v", err) }
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 { return "", fmt.Errorf("下载失败: HTTP %d", resp.StatusCode) }
-
-	tmp, err := os.CreateTemp(dir, ".monitor-update-*")
-	if err != nil { return "", fmt.Errorf("无法创建临时文件: %v", err) }
-	defer tmp.Close()
-
-	n, err := io.Copy(tmp, resp.Body)
-	if err != nil {
-		os.Remove(tmp.Name())
-		return "", fmt.Errorf("写入失败: %v", err)
-	}
-	if n < 1024*1024 { // 正常的二进制至少 10MB+，小于 1MB 一定是下载有问题
-		os.Remove(tmp.Name())
-		return "", fmt.Errorf("文件异常(%d 字节)，已取消更新", n)
-	}
-	if err := os.Chmod(tmp.Name(), 0755); err != nil {
-		os.Remove(tmp.Name())
-		return "", fmt.Errorf("设置权限失败: %v", err)
-	}
-	return tmp.Name(), nil
-}
-
-// 用下载好的新版本替换自身并重启（旧版本备份为 <程序名>.bak）
-func applyUpdate(newPath string) error {
-	binPath := currentBinPath()
-	backup := binPath + ".bak"
-
-	os.Remove(backup)
-	// Linux 允许重命名/替换正在运行的可执行文件
-	if err := os.Rename(binPath, backup); err != nil {
-		os.Remove(newPath)
-		return fmt.Errorf("备份原程序失败: %v", err)
-	}
-	if err := os.Rename(newPath, binPath); err != nil {
-		os.Rename(backup, binPath) // 还原
-		return fmt.Errorf("替换程序失败: %v", err)
-	}
-	fmt.Println("✅ 更新完成，正在重启...")
-	return syscall.Exec(binPath, os.Args, os.Environ())
-}
-
-// Agent 自检更新：下载 -> 替换 -> 重启（失败则继续正常运行）
-func trySelfUpdate(base string) {
-	if runtime.GOOS == "windows" {
-		fmt.Println(">> 当前系统不支持自动更新，请手动替换程序")
-		return
-	}
-	urls := candidateUpdateURLs(base, runtime.GOOS, runtime.GOARCH)
-	fmt.Println(">> 收到更新指令，开始下载新版本...")
-
-	newPath, err := downloadUpdateFile(urls)
-	if err != nil { fmt.Println(">> 更新失败:", err); return }
-	if err := applyUpdate(newPath); err != nil { fmt.Println(">> 更新失败:", err) }
 }
 
 // ================= Agent =================
@@ -1984,8 +1714,6 @@ func runAgent(server, token, id string) {
 					uninstallAgent()
 					return
 				}
-				// [新增] 服务端下发的更新指令（成功的话进程会直接被新版本替换）
-				if serverResp.Update { trySelfUpdate(serverResp.UpdateBase) }
 				if len(serverResp.PingTargets) > 0 {
 					newStr, _ := json.Marshal(serverResp.PingTargets)
 					oldStr, _ := json.Marshal(currentTargets)
