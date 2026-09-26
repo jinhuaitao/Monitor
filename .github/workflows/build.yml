@@ -82,15 +82,15 @@ jobs:
             dist/monitor-linux-${{ matrix.goarch }}
             dist/monitor-linux-${{ matrix.goarch }}.sha256
 
-      # 每次推送到 main/master 都会自动发布/更新到名为 "latest" 的 Release 中
+      # 每次推送到 main/master 都会自动发布/更新到名为 "latest" 的 Release 中（正式版）
       - name: Publish to Release
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest             # 使用固定的 tag 名
-          name: "Development Build"    # Release 显示的标题
-          body: "自动构建的最新开发版本（随每次 main 分支提交更新）"
-          prerelease: true             # 设为预览版，避免污染正式版
+          name: "Latest Release"       # Release 显示的标题
+          body: "自动构建的最新版本（随每次 main 分支提交更新）"
+          prerelease: false            # 设置为正式发布版本
           files: |
             dist/monitor-linux-${{ matrix.goarch }}
             dist/monitor-linux-${{ matrix.goarch }}.sha256
