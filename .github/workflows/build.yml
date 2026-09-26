@@ -91,4 +91,3 @@ jobs:
             dist/monitor-linux-${{ matrix.goarch }}
             dist/monitor-linux-${{ matrix.goarch }}.sha256
           generate_release_notes: true
-```[cite: 1]
