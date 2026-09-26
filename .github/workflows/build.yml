@@ -4,15 +4,17 @@ on:
   push:
     branches: [ main, master ]
     paths:
-      - '**/*.go'
-      - 'go.mod'
-      - 'go.sum'
+      - 'main.go'
+      - 'ui.go'
+      - 'update.go'
+      - 'version.go'
   pull_request:
     branches: [ main, master ]
     paths:
-      - '**/*.go'
-      - 'go.mod'
-      - 'go.sum'
+      - 'main.go'
+      - 'ui.go'
+      - 'update.go'
+      - 'version.go'
   workflow_dispatch:
 
 permissions:
