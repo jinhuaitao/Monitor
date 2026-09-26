@@ -11,8 +11,34 @@ permissions:
   contents: write
 
 jobs:
+  # 统一计算版本号，供编译注入与发布使用
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      commit: ${{ steps.ver.outputs.commit }}
+      build_time: ${{ steps.ver.outputs.build_time }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: ver
+        run: |
+          set -e
+          COMMIT="$(git rev-parse --short HEAD)"
+          VERSION="$(date -u +'%Y.%m.%d')-${COMMIT}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
   build:
     name: linux-${{ matrix.goarch }}
+    needs: version
     runs-on: ubuntu-latest
 
     strategy:
@@ -62,11 +88,18 @@ jobs:
           command -v "${CC%% *}" || true
 
       - name: Build
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          COMMIT: ${{ needs.version.outputs.commit }}
+          BUILD_TIME: ${{ needs.version.outputs.build_time }}
         run: |
           set -e
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w" -o "dist/monitor-linux-${{ matrix.goarch }}" .
+          go build -trimpath \
+            -ldflags "-s -w -X main.BuildVersion=${VERSION} -X main.BuildCommit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
+            -o "dist/monitor-linux-${{ matrix.goarch }}" .
           file "dist/monitor-linux-${{ matrix.goarch }}"
+          ./dist/monitor-linux-${{ matrix.goarch }} -mode version || true
 
       - name: Checksum
         run: |
@@ -82,9 +115,9 @@ jobs:
             dist/monitor-linux-${{ matrix.goarch }}
             dist/monitor-linux-${{ matrix.goarch }}.sha256
 
-  # 新增一个独立的发布 Job，等待 build 全部完成后统一打包上传，避免并发冲突
+  # 独立发布 Job，等待 build 全部完成后统一打包上传，避免并发冲突
   release:
-    needs: build
+    needs: [ version, build ]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     steps:
@@ -96,13 +129,41 @@ jobs:
       - name: Display downloaded files
         run: ls -R dist-all
 
+      # 写入 VERSION 文件：面板在线更新时据此精确比对版本
+      - name: Write VERSION file
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          COMMIT: ${{ needs.version.outputs.commit }}
+          BUILD_TIME: ${{ needs.version.outputs.build_time }}
+        run: |
+          set -e
+          printf '%s\n' "$VERSION" > dist-all/VERSION
+          cat dist-all/VERSION
+          {
+            echo "version=$VERSION"
+            echo "commit=$COMMIT"
+            echo "build_time=$BUILD_TIME"
+          } > dist-all/build-info.txt
+          cat dist-all/build-info.txt
+
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: "Latest Release"
-          body: "自动构建的最新版本（随每次 main 分支提交更新）"
+          body: |
+            自动构建的最新版本（随每次 main 分支提交更新）
+
+            版本号：`${{ needs.version.outputs.version }}`
+            提交：`${{ needs.version.outputs.commit }}`
+            构建时间：`${{ needs.version.outputs.build_time }}`
+
+            可在面板「系统管理 → 版本更新」中一键升级面板与客户端。
           prerelease: false
           files: |
             dist-all/monitor-linux-amd64/monitor-linux-amd64
+            dist-all/monitor-linux-amd64/monitor-linux-amd64.sha256
             dist-all/monitor-linux-arm64/monitor-linux-arm64
+            dist-all/monitor-linux-arm64/monitor-linux-arm64.sha256
+            dist-all/VERSION
+            dist-all/build-info.txt
