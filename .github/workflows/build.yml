@@ -1,0 +1,80 @@
+name: Build Monitor (amd64 / arm64)
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: linux-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64：使用 runner 自带的 gcc，原生编译
+          - goarch: amd64
+            cc: gcc
+          # ARM64：安装 aarch64 交叉编译器后交叉编译
+          - goarch: arm64
+            cc: aarch64-linux-gnu-gcc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # 依赖 gin v1.12 需要 Go >= 1.25，这里用 1.27
+          go-version: '1.27'
+          cache: true
+
+      - name: Install ARM64 cross compiler
+        if: matrix.goarch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '1'      # sqlite 驱动 (mattn/go-sqlite3) 必须开启 CGO
+          CC: ${{ matrix.cc }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o "dist/monitor-linux-${{ matrix.goarch }}" .
+          file "dist/monitor-linux-${{ matrix.goarch }}" || true
+
+      - name: Checksum
+        run: |
+          cd dist
+          sha256sum "monitor-linux-${{ matrix.goarch }}" > "monitor-linux-${{ matrix.goarch }}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitor-linux-${{ matrix.goarch }}
+          path: |
+            dist/monitor-linux-${{ matrix.goarch }}
+            dist/monitor-linux-${{ matrix.goarch }}.sha256
+
+      - name: Publish to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/monitor-linux-${{ matrix.goarch }}
+            dist/monitor-linux-${{ matrix.goarch }}.sha256
