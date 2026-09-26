@@ -431,8 +431,47 @@ func isDocker() bool {
 	return false
 }
 
+// detectServiceName 通过 init 脚本中记录的可执行文件路径反查真实服务名。
+// 例如 /etc/init.d/monitor_server 中 command="/opt/monitor/monitor"，
+// 或 /etc/systemd/system/xxx.service 中 ExecStart=/opt/monitor/monitor ...
+// 这样即使用户自定义了服务名，重启命令也不会猜错（猜错会导致 nohup 兜底再拉一个实例、抢占端口）。
+func detectServiceName(target string, fallbacks ...string) string {
+	scan := func(dir, suffix string) string {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return ""
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if suffix != "" && !strings.HasSuffix(name, suffix) {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				continue // 目录或不可读文件
+			}
+			if strings.Contains(string(b), target) {
+				return strings.TrimSuffix(name, suffix)
+			}
+		}
+		return ""
+	}
+	if svc := scan("/etc/systemd/system", ".service"); svc != "" {
+		return svc
+	}
+	if svc := scan("/etc/init.d", ""); svc != "" {
+		return svc
+	}
+	for _, f := range fallbacks {
+		if f != "" {
+			return f
+		}
+	}
+	return ""
+}
+
 // buildRestartLine 生成更新后的重启命令
-func buildRestartLine(target, serviceName string) string {
+func buildRestartLine(target, fallbackService string) string {
 	if custom := getRestartCmd(); custom != "" {
 		return custom
 	}
@@ -441,9 +480,16 @@ func buildRestartLine(target, serviceName string) string {
 		args = append(args, shellQuote(a))
 	}
 	argLine := strings.Join(args, " ")
-	return fmt.Sprintf(
-		"systemctl restart %s >/dev/null 2>&1 || rc-service %s restart >/dev/null 2>&1 || (nohup %s %s >>/tmp/monitor.log 2>&1 &)",
-		serviceName, serviceName, shellQuote(target), argLine)
+
+	parts := make([]string, 0, 3)
+	if svc := detectServiceName(target, fallbackService); svc != "" {
+		parts = append(parts,
+			fmt.Sprintf("systemctl restart %s >/dev/null 2>&1", shellQuote(svc)),
+			fmt.Sprintf("rc-service %s restart >/dev/null 2>&1", shellQuote(svc)))
+	}
+	// 最后兜底：直接以后台方式拉起（日志写入 /tmp/monitor.log 便于排查）
+	parts = append(parts, fmt.Sprintf("(nohup %s %s >>/tmp/monitor.log 2>&1 &)", shellQuote(target), argLine))
+	return strings.Join(parts, " || ")
 }
 
 // applyUpdateAndRestart 用新二进制替换自身并重启（脚本会脱离父进程执行）
