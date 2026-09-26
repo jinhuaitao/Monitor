@@ -20,12 +20,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # x86_64：使用 runner 自带的 gcc，原生编译
+          # x86_64：runner 自带的 gcc，原生编译
           - goarch: amd64
-            cc: gcc
-          # ARM64：安装 aarch64 交叉编译器后交叉编译
+            use_zig: false
+          # ARM64：用 zig 当 C 交叉编译器（不再依赖 apt 的 gcc-aarch64-linux-gnu）
           - goarch: arm64
-            cc: aarch64-linux-gnu-gcc
+            use_zig: true
+
+    env:
+      GOOS: linux
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: '1'   # gorm.io/driver/sqlite (mattn/go-sqlite3) 必须开 CGO
+      CC: ${{ matrix.use_zig && 'zig cc -target aarch64-linux-gnu' || 'gcc' }}
 
     steps:
       - name: Checkout
@@ -34,34 +40,46 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # 依赖 gin v1.12 需要 Go >= 1.25，这里用 1.27
+          # gin v1.12 要求 Go >= 1.25
           go-version: '1.27'
           cache: true
 
-      - name: Install ARM64 cross compiler
-        if: matrix.goarch == 'arm64'
+      # sqlite 驱动是 C 实现，交叉编译 arm64 必须有一个能产出 aarch64 代码的 C 编译器。
+      # zig 自带各 target 的 libc/头文件，装完即可当交叉编译器用，
+      # 不受 apt 源波动影响（原 apt install gcc-aarch64-linux-gnu 方案易在 update 阶段失败）。
+      - name: Setup zig (cross C compiler)
+        if: matrix.use_zig
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          set -e
+          ZIG_VERSION=0.15.2
+          mkdir -p "$HOME/.zig"
+          curl -fsSL -o /tmp/zig.tar.xz \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          tar -C "$HOME/.zig" --strip-components=1 -xf /tmp/zig.tar.xz
+          echo "$HOME/.zig" >> "$GITHUB_PATH"
+          "$HOME/.zig/zig" version
 
       - name: Download dependencies
         run: go mod download
 
-      - name: Build
-        env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: '1'      # sqlite 驱动 (mattn/go-sqlite3) 必须开启 CGO
-          CC: ${{ matrix.cc }}
+      - name: Show toolchain
         run: |
+          go version
+          go env GOOS GOARCH CGO_ENABLED CC
+          command -v "${CC%% *}" || true
+
+      - name: Build
+        run: |
+          set -e
           mkdir -p dist
           go build -trimpath -ldflags "-s -w" -o "dist/monitor-linux-${{ matrix.goarch }}" .
-          file "dist/monitor-linux-${{ matrix.goarch }}" || true
+          file "dist/monitor-linux-${{ matrix.goarch }}"
 
       - name: Checksum
         run: |
           cd dist
           sha256sum "monitor-linux-${{ matrix.goarch }}" > "monitor-linux-${{ matrix.goarch }}.sha256"
+          cat "monitor-linux-${{ matrix.goarch }}.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
