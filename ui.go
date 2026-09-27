@@ -10,6 +10,17 @@ const htmlDashboard = `
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Hub Monitor</title>
+<!-- ================= PWA ================= -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#eaf0f8">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Hub Monitor">
+<!-- ======================================= -->
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
@@ -542,6 +553,9 @@ body{
         <option value="net">排序：流量</option>
         <option value="new">排序：最新添加</option>
       </select>
+      <button class="btn-icon" id="installBtn" onclick="installPWA()" title="安装到桌面 / 主屏幕" style="display:none">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11"></path><path d="M8 11l4 4 4-4"></path><path d="M4 20h16"></path></svg>
+      </button>
       <button class="btn-icon" id="viewBtn" onclick="toggleView()" title="切换视图">
         <svg id="viewIcon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="2"></rect><rect x="14" y="3" width="7" height="7" rx="2"></rect><rect x="3" y="14" width="7" height="7" rx="2"></rect><rect x="14" y="14" width="7" height="7" rx="2"></rect></svg>
       </button>
@@ -892,6 +906,7 @@ function updateIcon(t){
   var sun='<circle cx="12" cy="12" r="4.5"></circle><line x1="12" y1="2" x2="12" y2="4"></line><line x1="12" y1="20" x2="12" y2="22"></line><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"></line><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"></line><line x1="2" y1="12" x2="4" y2="12"></line><line x1="20" y1="12" x2="22" y2="12"></line><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"></line><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"></line>';
   var moon='<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>';
   document.getElementById('themeIcon').innerHTML=t==='dark'?sun:moon;
+  setThemeColor(t);
   initBackground();
 }
 function initBackground(){
@@ -1499,6 +1514,46 @@ function createChart(cid,labels,datasets){
       elements:{line:{tension:.3,borderWidth:2},point:{radius:0,hoverRadius:4}},animation:false}});
 }
 
+/* ================= PWA ================= */
+/* 地址栏/状态栏配色跟随站内主题，而不是系统偏好 —— 站内主题是用户手动切的，
+   两者不一致时（系统亮色 + 站内深色）状态栏会突兀地亮一条 */
+function setThemeColor(t){
+  var m=document.querySelector('meta[name="theme-color"]');
+  if(m) m.setAttribute('content',t==='dark'?'#070b16':'#eaf0f8');
+}
+/* 安装入口：Chrome/Edge 会在满足可安装条件时抛 beforeinstallprompt，
+   把它拦下来换成顶栏的按钮；Safari 不抛该事件，点击时给出菜单指引 */
+var deferredPrompt=null;
+function showInstallBtn(on){
+  var b=document.getElementById('installBtn');
+  if(b) b.style.display=on?'':'none';
+}
+window.addEventListener('beforeinstallprompt',function(e){
+  e.preventDefault(); deferredPrompt=e; showInstallBtn(true);
+});
+window.addEventListener('appinstalled',function(){
+  deferredPrompt=null; showInstallBtn(false); toast('📲 已安装到桌面','ok');
+});
+function installPWA(){
+  if(!deferredPrompt){ toast('请在浏览器菜单里选择「添加到主屏幕」','warn'); return; }
+  deferredPrompt.prompt();
+  deferredPrompt.userChoice.then(function(r){
+    if(r&&r.outcome==='accepted') toast('📲 已添加到主屏幕','ok');
+    deferredPrompt=null; showInstallBtn(false);
+  });
+}
+/* Service Worker 只在安全上下文生效（HTTPS 或 localhost）。
+   面板常以 http://IP:端口 直接访问，此时浏览器会静默忽略注册，
+   这里显式判断一次，免得控制台刷出无意义的报错 */
+(function(){
+  if(!('serviceWorker' in navigator)) return;
+  var h=location.hostname;
+  if(location.protocol!=='https:'&&h!=='localhost'&&h!=='127.0.0.1') return;
+  window.addEventListener('load',function(){
+    navigator.serviceWorker.register('/sw.js',{scope:'/'}).catch(function(){});
+  });
+})();
+
 /* ================= 初始化 ================= */
 initTheme();
 applyViewIcon();
@@ -1526,6 +1581,8 @@ initBackground();
 updateStats();
 setInterval(updateStats,2000);
 if(isAdmin){ setTimeout(function(){checkUpdate(true);},1200); }
+/* PWA 快捷方式「系统管理」直达：长按图标即可跳到这里 */
+if(isAdmin&&new URLSearchParams(location.search).get('action')==='settings'){ openSettings(); }
 </script>
 </body>
 </html>
@@ -1536,8 +1593,19 @@ const htmlLogin = `
 <html lang="zh-CN" data-theme="{{ .Theme }}">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>{{ .Title }} · Hub Monitor</title>
+<!-- ================= PWA ================= -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#eaf0f8">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Hub Monitor">
+<!-- ======================================= -->
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -1637,6 +1705,14 @@ var cfgBgType="{{ .BgType }}",cfgBgUrl="{{ .BgCustomURL }}",cfgBgBlur={{ .BgBlur
   var s=document.documentElement.getAttribute('data-theme')||localStorage.getItem('theme');
   if(!s) s=window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
   document.documentElement.setAttribute('data-theme',s);
+  var m=document.querySelector('meta[name="theme-color"]');
+  if(m) m.setAttribute('content',s==='dark'?'#070b16':'#eaf0f8');
+  if('serviceWorker' in navigator){
+    var h=location.hostname;
+    if(location.protocol==='https:'||h==='localhost'||h==='127.0.0.1'){
+      navigator.serviceWorker.register('/sw.js',{scope:'/'}).catch(function(){});
+    }
+  }
 })();
 </script>
 </body>

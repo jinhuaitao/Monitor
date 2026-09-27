@@ -265,6 +265,9 @@ func runServer(port string) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
+	// PWA：manifest / Service Worker / 运行时绘制的图标 / 离线页
+	registerPWARoutes(r)
+
 	// 安全增强: 随机生成 Session Key
 	var sessionKey []byte
 	if envKey := os.Getenv("SESSION_KEY"); envKey != "" {
