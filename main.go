@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -21,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	
 	"time"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
@@ -72,6 +74,9 @@ var (
 
 	alertState = make(map[string]bool)
 )
+
+// errSetupClosed 表示面板已完成初始化，/setup 的建号入口必须关闭
+var errSetupClosed = errors.New("setup already completed")
 
 // ================= 数据库模型 =================
 
@@ -375,11 +380,33 @@ func runServer(port string) {
 		})
 	})
 	r.POST("/setup", func(c *gin.Context) {
+		// 安全修复：这里必须和 GET /setup 一样校验「面板是否已初始化」。
+		// 早期版本只在 GET 里判断，POST 直接建号 —— 等于面板装好之后
+		// 仍留着一个匿名可用的「创建管理员」后门，任何能访问面板的人
+		// 都能拿到完整管理权限（含向全部节点下发更新）。
 		u, p := c.PostForm("username"), c.PostForm("password")
-		if u != "" && p != "" {
-			db.Create(&User{Username: u, Password: hashPwd(p)})
-			c.Redirect(302, "/login")
+		if u == "" || p == "" {
+			c.Redirect(302, "/setup")
+			return
 		}
+		// 放进事务里做「计数 + 建号」：两个并发请求同时读到 cnt==0 时，
+		// 单靠 Count 判断会双双建号成功，事务能把这层竞态关掉。
+		err := db.Transaction(func(tx *gorm.DB) error {
+			var cnt int64
+			if err := tx.Model(&User{}).Count(&cnt).Error; err != nil {
+				return err
+			}
+			if cnt > 0 {
+				return errSetupClosed
+			}
+			return tx.Create(&User{Username: u, Password: hashPwd(p)}).Error
+		})
+		if err != nil {
+			// 已初始化（或并发抢跑失败）一律回到登录页，不再泄露任何信息
+			c.Redirect(302, "/login")
+			return
+		}
+		c.Redirect(302, "/login")
 	})
 	r.GET("/login", func(c *gin.Context) {
 		var cnt int64
@@ -447,6 +474,8 @@ func runServer(port string) {
 
 			var s SystemStatus
 			if err := c.ShouldBindJSON(&s); err == nil {
+				// 先收敛不可信字段，再进入缓存 / 数据库 / 界面
+				sanitizeReport(&s)
 				s.LastUpdate = time.Now()
 				if s.IP == "" {
 					s.IP = c.ClientIP()
@@ -892,6 +921,16 @@ func runServer(port string) {
 				repo := strings.TrimSpace(c.PostForm("repo"))
 				proxy := strings.TrimSpace(c.PostForm("proxy"))
 				cmd := strings.TrimSpace(c.PostForm("cmd"))
+				// 更新源直接决定「推给所有节点的二进制从哪来」，
+				// 等同于一条对全部被控服务器的执行通道，不接受任意字符串
+				if repo != "" && !validRepo(repo) {
+					c.String(400, "仓库格式不正确，应为 owner/repo（如 jinhuaitao/Monitor）")
+					return
+				}
+				if !validProxy(proxy) {
+					c.String(400, "加速镜像必须是 https:// 开头的完整地址")
+					return
+				}
 				saveConfig("update_repo", repo)
 				saveConfig("update_proxy", proxy)
 				saveConfig("restart_cmd", cmd)
@@ -1106,6 +1145,34 @@ func checkPwd(password, stored string) bool {
 	expectedHash, _ := hex.DecodeString(parts[1])
 	actualHash := sha256.Sum256(append(salt, []byte(password)...))
 	return subtle.ConstantTimeCompare(expectedHash, actualHash[:]) == 1
+}
+
+// cleanField 剔除控制字符并截断到指定长度
+func cleanField(v string, max int) string {
+	v = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, v)
+	if rs := []rune(v); len(rs) > max {
+		v = string(rs[:max])
+	}
+	return strings.TrimSpace(v)
+}
+
+// sanitizeReport 收敛 Agent 上报的文本字段。
+//
+// 这些字段（os / ip / version / arch / agent_id）会原样出现在面板界面上，
+// 属于不可信输入：任何拿到 Token 的人都能往 /api/report 里塞任意内容。
+// 前端已经做了转义（那才是防 XSS 的正解），这里再限长 + 去控制字符，
+// 避免超长内容把卡片布局撑坏，也顺带挡住换行注入之类的花样。
+func sanitizeReport(s *SystemStatus) {
+	s.AgentID = cleanField(s.AgentID, 64)
+	s.OS = cleanField(s.OS, 64)
+	s.IP = cleanField(s.IP, 64)
+	s.Version = cleanField(s.Version, 32)
+	s.Arch = cleanField(s.Arch, 16)
 }
 
 // ================= Agent =================

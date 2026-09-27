@@ -663,6 +663,7 @@ body{
 
           <div class="divider"></div>
           <h4 class="sec-title">更新源设置</h4>
+          <div class="form-hint">⚠️ 更新源决定「下发给所有节点的程序从哪里来」。节点收到更新后会以 <b>root 身份替换自身并重启</b>，因此请只填写你完全信任的仓库 —— 换个仓库地址等价于把这条执行通道交给对方。</div>
           <div class="form-group">
             <label class="form-label">GitHub 仓库 (owner/repo)</label>
             <input type="text" id="updateRepo" class="input-text" placeholder="jinhuaitao/Monitor">
@@ -1258,7 +1259,7 @@ function loadNodeList(){
     var ver=s.version?(s.version==='dev'?'dev':'v'+s.version):'—';
     html+='<div class="node-row">'+
       '<div style="flex:1;min-width:150px"><div style="font-weight:600;font-size:14px">'+escapeHtml(s.name||s.agent_id)+'</div>'+
-      '<div style="font-size:11.5px;color:var(--text-mute);font-family:Menlo,monospace;margin-top:3px">'+id+' · '+ver+' · '+(s.arch||'?')+'</div></div>'+
+      '<div style="font-size:11.5px;color:var(--text-mute);font-family:Menlo,monospace;margin-top:3px">'+escapeHtml(id)+' · '+escapeHtml(ver)+' · '+escapeHtml(s.arch||'?')+'</div></div>'+
       '<div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">'+
         '<button class="btn-outline btn-sm" style="opacity:'+(s.hide_id?.45:1)+'" onclick="toggleHide(\''+id+'\')" title="显示/隐藏ID">👁️</button>'+
         '<input type="number" class="input-text" style="width:62px;padding:7px;text-align:center" value="'+(s.sort_order||0)+'" placeholder="排序" id="s-'+id+'">'+
@@ -1412,9 +1413,9 @@ function renderAgentUpdateList(){
     else {badge='未同步';cls='mute';}
     html+='<div class="upd-node">'+
       '<div style="flex:1;min-width:140px"><div style="font-weight:600;font-size:13.5px">'+escapeHtml(s.name||s.agent_id)+'</div>'+
-      '<div style="font-size:11.5px;color:var(--text-mute);font-family:Menlo,monospace;margin-top:2px">'+id+' · '+(s.arch||'?')+'</div></div>'+
+      '<div style="font-size:11.5px;color:var(--text-mute);font-family:Menlo,monospace;margin-top:2px">'+escapeHtml(id)+' · '+escapeHtml(s.arch||'?')+'</div></div>'+
       '<span class="badge '+cls+'">'+badge+'</span>'+
-      '<span class="ver-chip" style="margin-right:2px">'+(v==='dev'?'dev':'v'+v)+'</span>'+
+      '<span class="ver-chip" style="margin-right:2px">'+escapeHtml(v==='dev'?'dev':'v'+v)+'</span>'+
       '<button class="btn-primary btn-sm" onclick="pushUpdate(\''+id+'\')">更新</button>'+
     '</div>';
   });
@@ -1446,19 +1447,29 @@ function saveUpdateSource(){
   var c=document.getElementById('restartCmd').value.trim();
   fetch('/api/settings/update/source',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:'repo='+encodeURIComponent(r)+'&proxy='+encodeURIComponent(p)+'&cmd='+encodeURIComponent(c)})
-  .then(function(){updateRepo=r;updateProxy=p;restartCmd=c;toast('更新源设置已保存','ok');});
+  .then(function(res){
+    // 服务端会校验仓库 / 镜像格式并返回 400；必须把原因显示出来，
+    // 否则用户会以为「保存成功」，实际仍是旧配置
+    if(!res.ok) return res.text().then(function(t){throw new Error(t||'保存失败');});
+    updateRepo=r;updateProxy=p;restartCmd=c;toast('更新源设置已保存','ok');
+  })
+  .catch(function(e){toast('❌ '+(e.message||'保存失败'),'err');});
 }
 
 /* ================= 详情 / 图表 ================= */
+/* 安全提示：os / ip / arch / version 全部来自 Agent 上报，是不可信输入。
+   下面几处会把它们拼进 innerHTML，必须逐个 escapeHtml ——
+   节点名称本来就走 escapeHtml，这几个字段曾经是漏网的，
+   一旦被注入，脚本会以管理员身份执行（含向全部节点下发更新）。 */
 function openNodeDetails(id){
   if(!statsData[id]) return;
   var s=statsData[id], flag=getFlagEmoji(s.country_code);
-  document.getElementById('detailTitle').innerHTML='<span class="nc-flag">'+flag+'</span> '+escapeHtml(s.name||s.agent_id)+' <span class="ver-chip">'+((s.version&&s.version!=='dev')?'v'+s.version:'dev')+'</span>';
+  document.getElementById('detailTitle').innerHTML='<span class="nc-flag">'+flag+'</span> '+escapeHtml(s.name||s.agent_id)+' <span class="ver-chip">'+escapeHtml((s.version&&s.version!=='dev')?'v'+s.version:'dev')+'</span>';
   var items=[
-    ['节点名称 / ID', '<span class="nc-flag">'+flag+'</span>'+escapeHtml(s.name||s.agent_id)+'<br><span style="font-size:12px;color:var(--text-mute)">'+s.agent_id+'</span>'],
-    ['操作系统', s.os||'—'],
-    ['IP 地址', s.ip||'—'],
-    ['架构 / 版本', (s.arch||'—')+' · '+((s.version&&s.version!=='dev')?'v'+s.version:'dev')],
+    ['节点名称 / ID', '<span class="nc-flag">'+flag+'</span>'+escapeHtml(s.name||s.agent_id)+'<br><span style="font-size:12px;color:var(--text-mute)">'+escapeHtml(s.agent_id)+'</span>'],
+    ['操作系统', escapeHtml(s.os||'—')],
+    ['IP 地址', escapeHtml(s.ip||'—')],
+    ['架构 / 版本', escapeHtml(s.arch||'—')+' · '+escapeHtml((s.version&&s.version!=='dev')?'v'+s.version:'dev')],
     ['持续运行', fmtUptime(s.uptime)],
     ['总下载 / 上传', '↓ '+fmtBytes(s.net_total_in)+'<br>↑ '+fmtBytes(s.net_total_out)]
   ];

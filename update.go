@@ -2,14 +2,17 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -100,17 +103,27 @@ func getUpdateState() UpdateTaskState {
 
 func getUpdateRepo() string {
 	globalConfig.RLock()
-	defer globalConfig.RUnlock()
-	if globalConfig.UpdateRepo == "" {
+	repo := globalConfig.UpdateRepo
+	globalConfig.RUnlock()
+	if repo == "" {
 		return defaultRepo
 	}
-	return globalConfig.UpdateRepo
+	if !validRepo(repo) {
+		// 存量配置里可能是早期版本写进来的任意字符串，一律退回官方仓库，
+		// 不要把一个畸形地址当成更新源去下载
+		return defaultRepo
+	}
+	return repo
 }
 
 func getUpdateProxy() string {
 	globalConfig.RLock()
-	defer globalConfig.RUnlock()
-	return strings.TrimSpace(globalConfig.UpdateProxy)
+	p := strings.TrimSpace(globalConfig.UpdateProxy)
+	globalConfig.RUnlock()
+	if !validProxy(p) {
+		return ""
+	}
+	return p
 }
 
 func getRestartCmd() string {
@@ -123,6 +136,84 @@ func getAgentBundleVersion() string {
 	globalConfig.RLock()
 	defer globalConfig.RUnlock()
 	return globalConfig.AgentBundleVersion
+}
+
+// ================= 更新源校验 =================
+//
+// 更新源是整个面板最敏感的一处配置：面板会把从该仓库下载到的二进制
+// 原样下发给所有节点，节点收到后以 root 身份替换自身并重启。
+// 因此「更新源」在效果上等价于一条对所有被控服务器的执行通道，
+// 不能接受任意字符串 —— 至少要挡住畸形输入和非 https 的镜像。
+
+// owner/repo 形态（GitHub 用户名与仓库名的合法字符集）
+var repoPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
+
+func validRepo(s string) bool {
+	return repoPattern.MatchString(strings.TrimSpace(s))
+}
+
+// validProxy 只接受 https 前缀：镜像会被直接拼在下载地址前面，
+// 用 http 会让整条更新链降级成明文，等于把二进制交给中间人。
+func validProxy(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return true
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "https" && u.Host != ""
+}
+
+// ELF 头中的机器类型
+const (
+	emX86_64  = 62  // EM_X86_64
+	emAARCH64 = 183 // EM_AARCH64
+)
+
+// verifyBinary 在把二进制交出去之前做一次「它到底是不是能跑的程序」的体检。
+//
+// 为什么必须有这一步：面板会把自己缓存的这份文件下发给所有节点，
+// 节点收到后直接替换自身并重启。如果放进来的是 GitHub 错误页、被截断的下载、
+// 或者架构不对的二进制，后果不是「某个节点更新失败」，而是【所有】节点
+// 一起起不来 —— 一次误判就是全站失联，且没法从面板上救回来。
+//
+// 校验 sha256 挡不住这类问题：sha256 来自同一个仓库，坏源配坏哈希，永远对得上。
+func verifyBinary(path, arch string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	// 正常构建产物在 10MB 以上；1MB 以下基本可以断定是错误页或截断文件
+	if st.Size() < 1<<20 {
+		return fmt.Errorf("文件仅 %d 字节，不是完整的程序", st.Size())
+	}
+
+	var hdr [20]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return fmt.Errorf("读取文件头失败：%v", err)
+	}
+	if hdr[0] != 0x7f || hdr[1] != 'E' || hdr[2] != 'L' || hdr[3] != 'F' {
+		return fmt.Errorf("不是 ELF 可执行文件（多半是错误页或损坏的下载）")
+	}
+	if hdr[4] != 2 { // EI_CLASS: 2 = 64 位
+		return fmt.Errorf("不是 64 位 ELF")
+	}
+	want := uint16(emX86_64)
+	if normalizeArch(arch) == "arm64" {
+		want = emAARCH64
+	}
+	if got := binary.LittleEndian.Uint16(hdr[18:20]); got != want {
+		return fmt.Errorf("架构不匹配：文件 machine=%d，期望 %s(%d)", got, normalizeArch(arch), want)
+	}
+	return nil
 }
 
 // ================= 网络工具 =================
@@ -584,6 +675,13 @@ func startServerUpdate() {
 			failUpdateState("下载失败：" + err.Error())
 			return
 		}
+		// 这一步替换的是面板自身：文件不对就等于把自己弄下线，
+		// 而且没有面板可用来自救，所以体检不能省。
+		if err := verifyBinary(tmp, archOfSelf()); err != nil {
+			os.Remove(tmp)
+			failUpdateState("新版本文件校验失败：" + err.Error())
+			return
+		}
 
 		setUpdateState("安装并重启", 85)
 		if err := applyUpdateAndRestart(tmp, target, "monitor_server"); err != nil {
@@ -637,21 +735,35 @@ func startAgentSync() {
 
 		total := strings.Split(supportedArch, ",")
 		ok := 0
+		lastErr := ""
 		for i, arch := range total {
 			setUpdateState("下载 "+arch+" 客户端", 10+70*i/len(total))
 			asset := findAsset(rel, binaryPrefix+arch)
 			if asset == nil {
+				lastErr = "发布资源中缺少 " + binaryPrefix + arch
 				continue
 			}
 			dest := agentBinaryPath(arch)
 			os.Remove(dest + ".tmp")
 			if err := downloadAsset(asset, dest); err != nil {
+				lastErr = "下载 " + arch + " 失败：" + err.Error()
+				continue
+			}
+			// 体检通过才留在本地缓存：这份文件随后会被推给所有节点，
+			// 坏文件必须挡在这里，而不是等节点替换自身之后才发现。
+			if err := verifyBinary(dest, arch); err != nil {
+				os.Remove(dest)
+				lastErr = arch + " 客户端校验失败：" + err.Error()
 				continue
 			}
 			ok++
 		}
 		if ok == 0 {
-			failUpdateState("未下载到任何客户端二进制，请检查网络或更换加速镜像")
+			msg := "未下载到任何可用的客户端二进制，请检查网络或更换加速镜像"
+			if lastErr != "" {
+				msg += "（" + lastErr + "）"
+			}
+			failUpdateState(msg)
 			return
 		}
 		saveConfig("agent_bundle_version", rel.Version)
