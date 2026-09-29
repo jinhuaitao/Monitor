@@ -14,6 +14,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,8 +23,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	
+
 	"time"
+
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
@@ -33,6 +35,7 @@ import (
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
 	gonet "github.com/shirou/gopsutil/v3/net"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -43,6 +46,10 @@ type PingTargetConfig struct {
 	Target string `json:"target"`
 	Alias  string `json:"alias"`
 }
+
+// dbPath 面板数据库文件位置。放在变量里而不是到处硬编码 "monitor.db"：
+// 系统信息页要显示真实路径，数据备份也要按它去找文件。
+var dbPath = "monitor.db"
 
 var (
 	statusCache = make(map[string]SystemStatus)
@@ -56,6 +63,8 @@ var (
 		TGToken    string
 		TGChatID   string
 		WebhookURL string
+		// WebhookFormat 决定推给 Webhook 的 JSON 结构（钉钉 / 飞书 / Discord / Slack 各不相同）
+		WebhookFormat string
 		// === 外观配置 ===
 		SiteTheme   string
 		BgType      string
@@ -70,9 +79,21 @@ var (
 		UpdateProxy        string // 下载加速镜像前缀
 		RestartCmd         string // 更新后重启命令（留空自动检测）
 		AgentBundleVersion string // 面板已缓存的客户端版本
+		// === 告警规则（详见 alert.go）===
+		AlertEnabled     bool
+		AlertOffline     bool
+		AlertOfflineSec  int
+		AlertCooldownMin int
+		AlertCPU         float64
+		AlertMem         float64
+		AlertDisk        float64
+		AlertKeepDays    int
+		// === 数据保留 ===
+		HistoryKeepHours int
+		AuditKeepDays    int
+		// === 会话版本：改密码后自增，旧 Cookie 立即失效 ===
+		SessionEpoch string
 	}
-
-	alertState = make(map[string]bool)
 )
 
 // errSetupClosed 表示面板已完成初始化，/setup 的建号入口必须关闭
@@ -102,6 +123,9 @@ type Node struct {
 	AgentVersion  string    // 客户端上报的程序版本
 	PendingUpdate string    // 待下发的客户端版本号
 	CreatedAt     time.Time // [新增] 用于记录添加时间
+	Group         string    `gorm:"default:''"`    // [新增] 分组，用于节点多时的归类与筛选
+	Maintenance   bool      `gorm:"default:false"` // [新增] 维护模式：期间不触发任何告警
+	AlertMuted    bool      `gorm:"default:false"` // [新增] 仅静音告警，但节点仍正常显示
 }
 
 type MonitorHistory struct {
@@ -138,6 +162,9 @@ type SystemStatus struct {
 	Version         string             `json:"version"`        // [新增] 客户端/面板程序版本
 	Arch            string             `json:"arch"`           // [新增] CPU 架构
 	PendingUpdate   string             `json:"pending_update"` // [新增] 待更新版本（仅管理员可见）
+	Group           string             `json:"group"`          // [新增] 节点分组
+	Maintenance     bool               `json:"maintenance"`    // [新增] 维护模式
+	AlertMuted      bool               `json:"alert_muted"`    // [新增] 告警静音
 }
 
 // UpdateCommand 下发给 Agent 的自更新指令
@@ -256,18 +283,25 @@ func installCommand(serverURL, token, id string) string {
 
 func runServer(port string) {
 	var err error
-	db, err = gorm.Open(sqlite.Open("monitor.db"), &gorm.Config{})
+	dbPath = "monitor.db"
+	db, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
 	if err != nil {
 		panic(err)
 	}
 
-	db.AutoMigrate(&User{}, &AppConfig{}, &Node{}, &MonitorHistory{})
+	db.AutoMigrate(&User{}, &AppConfig{}, &Node{}, &MonitorHistory{}, &AuditLog{}, &AlertEvent{})
 	loadGlobalConfig()
 	go monitorAlerts()
-	go cleanupHistory()
+	go cleanupMaintenance()
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+
+	// 安全增强：不信任任何代理头。
+	// gin 默认把 X-Forwarded-For 当作可信来源，于是 ClientIP() 可被请求方随意伪造 ——
+	// 对「登录限流」这种按 IP 计数的防护来说，等于形同虚设。
+	// 这里显式关掉信任代理，ClientIP()/RemoteIP() 一律回落到真实 TCP 对端。
+	_ = r.SetTrustedProxies(nil)
 
 	// PWA：manifest / Service Worker / 运行时绘制的图标 / 离线页
 	registerPWARoutes(r)
@@ -377,6 +411,7 @@ func runServer(port string) {
 			"Theme":    theme,
 			"BgType":   bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
 			"Version": displayVersion(),
+			"Err":     c.Query("err"),
 		})
 	})
 	r.POST("/setup", func(c *gin.Context) {
@@ -387,6 +422,11 @@ func runServer(port string) {
 		u, p := c.PostForm("username"), c.PostForm("password")
 		if u == "" || p == "" {
 			c.Redirect(302, "/setup")
+			return
+		}
+		// 初始管理员同样受密码强度约束：这是整条权限链的根，最不该被设成 123456
+		if msg := passwordWeakness(u, p); msg != "" {
+			c.Redirect(302, "/setup?err="+url.QueryEscape(msg))
 			return
 		}
 		// 放进事务里做「计数 + 建号」：两个并发请求同时读到 cnt==0 时，
@@ -406,6 +446,7 @@ func runServer(port string) {
 			c.Redirect(302, "/login")
 			return
 		}
+		auditAs(c, u, "setup", u, "创建管理员账号", true)
 		c.Redirect(302, "/login")
 	})
 	r.GET("/login", func(c *gin.Context) {
@@ -415,7 +456,7 @@ func runServer(port string) {
 			c.Redirect(302, "/setup")
 			return
 		}
-		if sessions.Default(c).Get("user") != nil {
+		if isAdminSession(c) {
 			c.Redirect(302, "/")
 			return
 		}
@@ -435,24 +476,59 @@ func runServer(port string) {
 			"Theme":    theme,
 			"BgType":   bgType, "BgCustomURL": bgUrl, "BgBlur": bgBlur, "CardOpacity": cardOp,
 			"Version": displayVersion(),
+			"Err":     c.Query("err"),
 		})
 	})
 	r.POST("/login", func(c *gin.Context) {
 		u, p := c.PostForm("username"), c.PostForm("password")
+
+		// ① 先看这个来源是否已被限流。判定必须放在校验密码之前，
+		//    否则爆破方每猜一次都还能拿到「密码对不对」的信息量。
+		if wait, blocked := loginBlocked(c); blocked {
+			auditAs(c, u, "login_blocked", u,
+				fmt.Sprintf("来源连续失败次数超限，剩余锁定 %d 秒", wait), false)
+			c.Redirect(302, "/login?err="+url.QueryEscape(
+				fmt.Sprintf("失败次数过多，请在 %d 秒后重试", wait)))
+			return
+		}
+
 		var user User
-		// 安全增强: 校验加盐哈希
+		// 安全增强: 校验加盐哈希（老库为 SHA-256，登录成功后自动升级为 bcrypt）
 		if db.Where("username=?", u).First(&user).Error == nil {
-			if checkPwd(p, user.Password) {
+			if ok, needUpgrade := checkPwdUpgrade(p, user.Password); ok {
+				if needUpgrade {
+					db.Model(&User{}).Where("id = ?", user.ID).
+						Update("password", hashPwd(p))
+				}
+				loginSucceeded(c)
 				s := sessions.Default(c)
 				s.Set("user", u)
+				s.Set("epoch", sessionEpoch())
 				s.Save()
+				auditAs(c, u, "login", u, "登录成功", true)
 				c.Redirect(302, "/")
 				return
 			}
 		}
-		c.Redirect(302, "/login")
+
+		// 失败：累计计数并告知剩余次数（对真正的管理员有用，对爆破方只是延迟）
+		left := loginFailed(c, u)
+		auditAs(c, u, "login", u, "用户名或密码错误", false)
+		msg := "用户名或密码错误"
+		if left > 0 {
+			msg = fmt.Sprintf("用户名或密码错误，还可尝试 %d 次", left)
+		} else {
+			msg = "失败次数过多，账号已临时锁定，请稍后重试"
+		}
+		c.Redirect(302, "/login?err="+url.QueryEscape(msg))
 	})
-	r.GET("/logout", func(c *gin.Context) { s := sessions.Default(c); s.Clear(); s.Save(); c.Redirect(302, "/") })
+	r.GET("/logout", func(c *gin.Context) {
+		audit(c, "logout", "", "退出登录", true)
+		s := sessions.Default(c)
+		s.Clear()
+		s.Save()
+		c.Redirect(302, "/")
+	})
 
 	api := r.Group("/api")
 	{
@@ -560,23 +636,31 @@ func runServer(port string) {
 		})
 
 		api.GET("/stats", func(c *gin.Context) {
-			isAdmin := sessions.Default(c).Get("user") != nil
+			isAdmin := isAdminSession(c)
 
 			// 1. 获取所有数据库中的节点
 			var nodes []Node
 			db.Find(&nodes)
 
+			// 先把缓存整份快照出来，再放开读锁。
+			// 原实现把 RLock 一直 defer 到函数结束，而序列化上百个节点的 JSON
+			// 根本不需要占着这把锁 —— 那期间所有 Agent 的心跳上报都会堵在
+			// cacheMutex.Lock() 上，节点越多越明显。
+			snapshot := make(map[string]SystemStatus, len(statusCache))
 			cacheMutex.RLock()
-			defer cacheMutex.RUnlock()
-			res := make(map[string]SystemStatus)
+			for k, v := range statusCache {
+				snapshot[k] = v
+			}
+			cacheMutex.RUnlock()
 
+			res := make(map[string]SystemStatus, len(nodes))
 			for _, n := range nodes {
 				if n.Denied {
 					continue
 				}
 
 				// 2. 优先读取缓存中的实时数据
-				if v, ok := statusCache[n.AgentID]; ok {
+				if v, ok := snapshot[n.AgentID]; ok {
 					if !isAdmin {
 						v.IP = "Hidden"
 					}
@@ -593,6 +677,9 @@ func runServer(port string) {
 					if !isAdmin {
 						v.PendingUpdate = ""
 					}
+					v.Group = n.Group
+					v.Maintenance = n.Maintenance
+					v.AlertMuted = n.AlertMuted
 					res[n.AgentID] = v
 				} else {
 					// 3. 如果缓存没有（新建未连接），构造一个“待机”状态
@@ -608,6 +695,9 @@ func runServer(port string) {
 						Arch:          n.Arch,
 						Version:       n.AgentVersion,
 						PendingUpdate: n.PendingUpdate,
+						Group:         n.Group,
+						Maintenance:   n.Maintenance,
+						AlertMuted:    n.AlertMuted,
 					}
 					if !isAdmin {
 						v.PendingUpdate = ""
@@ -696,6 +786,11 @@ func runServer(port string) {
 		auth := api.Group("/")
 		auth.Use(authMiddleware())
 		{
+			// 系统管理扩展模块（审计 / 账号 / 系统信息 / 数据管理 / 节点批量操作）
+			registerAdminRoutes(auth)
+			// 告警规则与告警历史
+			registerAlertRoutes(auth)
+
 			auth.POST("/settings/create_node", func(c *gin.Context) {
 				name := c.PostForm("name")
 				if name == "" {
@@ -724,6 +819,7 @@ func runServer(port string) {
 				// 命令内含 uname -m 探测，目标机器自行选择 amd64 / arm64 二进制
 				cmd := installCommand(serverURL, token, id)
 
+				audit(c, "node_create", id, "新建节点："+name, true)
 				c.JSON(200, gin.H{
 					"status": "ok",
 					"id":     id,
@@ -733,14 +829,18 @@ func runServer(port string) {
 
 			auth.POST("/settings/token", func(c *gin.Context) {
 				t := c.PostForm("token")
-				if len(t) < 3 {
-					c.Status(400)
+				if len(t) < 8 {
+					// 通信 Token 是 Agent 身份的唯一凭据，弱 Token 等于把
+					// /api/report 直接开放给猜得到的人
+					c.String(400, "Token 至少需要 8 位字符")
 					return
 				}
 				saveConfig("token", t)
 				globalConfig.Lock()
 				globalConfig.Token = t
 				globalConfig.Unlock()
+				// 改 Token 会让全部已装 Agent 立刻掉线，属于高危动作，必须留痕
+				audit(c, "token_change", "", "修改 Agent 通信 Token（全部节点将重新鉴权）", true)
 				c.Status(200)
 			})
 			auth.POST("/settings/url", func(c *gin.Context) {
@@ -749,29 +849,48 @@ func runServer(port string) {
 				globalConfig.Lock()
 				globalConfig.ServerURL = u
 				globalConfig.Unlock()
+				audit(c, "server_url", "", "修改面板公网地址："+u, true)
 				c.Status(200)
 			})
 			auth.POST("/settings/alert", func(c *gin.Context) {
 				tk, ch, wh := c.PostForm("token"), c.PostForm("chat"), c.PostForm("webhook")
+				wf := c.PostForm("format")
+				if wf == "" {
+					wf = "generic"
+				}
 				saveConfig("tg_token", tk)
 				saveConfig("tg_chat", ch)
 				saveConfig("webhook_url", wh)
+				saveConfig("webhook_format", wf)
 				globalConfig.Lock()
 				globalConfig.TGToken = tk
 				globalConfig.TGChatID = ch
 				globalConfig.WebhookURL = wh
+				globalConfig.WebhookFormat = wf
 				globalConfig.Unlock()
+				audit(c, "alert_config", "", "更新告警通道配置（Webhook 格式："+wf+"）", true)
 				c.Status(200)
 			})
 			auth.POST("/settings/test_alert", func(c *gin.Context) {
-				sendAlert("🔔 测试告警消息\nMonitor 配置成功！")
+				if n := sendAlert("🔔 测试告警消息\nMonitor 配置成功！"); n == 0 {
+					audit(c, "alert_test", "", "发送测试告警失败：未配置任何通知通道", false)
+					c.String(400, "尚未配置任何通知通道，请先填写 Telegram 或 Webhook 地址")
+					return
+				}
+				audit(c, "alert_test", "", "发送测试告警", true)
 				c.Status(200)
 			})
 			auth.POST("/settings/update_node", func(c *gin.Context) {
 				id := c.PostForm("id")
-				name := c.PostForm("name")
+				name := cleanField(c.PostForm("name"), 64)
 				sort, _ := strconv.Atoi(c.PostForm("sort"))
-				db.Model(&Node{}).Where("agent_id=?", id).Updates(map[string]interface{}{"name": name, "sort_order": sort})
+				upd := map[string]interface{}{"name": name, "sort_order": sort}
+				// 分组也在这个入口一起提交；留空表示移出分组
+				if _, ok := c.GetPostForm("group"); ok {
+					upd["group"] = cleanField(c.PostForm("group"), 32)
+				}
+				db.Model(&Node{}).Where("agent_id=?", id).Updates(upd)
+				audit(c, "node_update", id, "更新节点信息："+name, true)
 				c.Status(200)
 			})
 
@@ -797,11 +916,17 @@ func runServer(port string) {
 			auth.POST("/settings/save_global_targets", func(c *gin.Context) {
 				var targets []PingTargetConfig
 				if c.ShouldBindJSON(&targets) == nil {
+					// 目标会被拼进 Agent 的 ping 命令，先收敛一下长度与非法字符
+					for i := range targets {
+						targets[i].Target = cleanField(targets[i].Target, 128)
+						targets[i].Alias = cleanField(targets[i].Alias, 32)
+					}
 					b, _ := json.Marshal(targets)
 					saveConfig("sys_ping_targets", string(b))
 					globalConfig.Lock()
 					globalConfig.PingTargets = targets
 					globalConfig.Unlock()
+					audit(c, "targets_save", "", fmt.Sprintf("保存监控目标，共 %d 项", len(targets)), true)
 					c.Status(200)
 				}
 			})
@@ -814,10 +939,14 @@ func runServer(port string) {
 			})
 			auth.POST("/settings/delete", func(c *gin.Context) {
 				id := c.PostForm("id")
+				var n Node
+				db.First(&n, "agent_id=?", id)
 				db.Model(&Node{}).Where("agent_id=?", id).Update("denied", true)
 				cacheMutex.Lock()
 				delete(statusCache, id)
 				cacheMutex.Unlock()
+				clearNodeAlertState(id)
+				audit(c, "node_delete", id, "删除节点："+n.Name, true)
 				c.Status(200)
 			})
 
@@ -878,6 +1007,7 @@ func runServer(port string) {
 					c.JSON(200, gin.H{"error": "已有更新任务正在进行"})
 					return
 				}
+				audit(c, "update_server", "", "触发面板自更新", true)
 				startServerUpdate()
 				c.Status(200)
 			})
@@ -891,17 +1021,25 @@ func runServer(port string) {
 					c.JSON(200, gin.H{"error": "已有更新任务正在进行"})
 					return
 				}
+				audit(c, "agent_sync", "", "同步客户端二进制到面板", true)
 				startAgentSync()
 				c.Status(200)
 			})
 
 			// 下发客户端更新指令（id=all 表示全部）
 			auth.POST("/settings/update/agent_push", func(c *gin.Context) {
-				n, err := pushAgentUpdate(c.PostForm("id"))
+				target := c.PostForm("id")
+				n, err := pushAgentUpdate(target)
 				if err != nil {
 					c.JSON(200, gin.H{"error": err.Error()})
 					return
 				}
+				// 这是最敏感的一条：指令落到节点后会以 root 身份替换并重启进程
+				label := target
+				if target == "" || target == "all" {
+					label = "全部节点"
+				}
+				audit(c, "agent_push", label, fmt.Sprintf("下发客户端更新，命中 %d 个节点", n), true)
 				c.JSON(200, gin.H{"count": n})
 			})
 
@@ -939,6 +1077,8 @@ func runServer(port string) {
 				globalConfig.UpdateProxy = proxy
 				globalConfig.RestartCmd = cmd
 				globalConfig.Unlock()
+				audit(c, "update_source", repo,
+					fmt.Sprintf("更新源变更为 %s（镜像：%s）", repo, proxy), true)
 				c.Status(200)
 			})
 		}
@@ -948,63 +1088,56 @@ func runServer(port string) {
 	r.Run(":" + port)
 }
 
-func monitorAlerts() {
-	for {
-		time.Sleep(5 * time.Second)
-		cacheMutex.RLock()
-		for id, s := range statusCache {
-			isOffline := time.Since(s.LastUpdate) > 30*time.Second
-			alreadyAlerted := alertState[id]
-			if isOffline && !alreadyAlerted {
-				alertState[id] = true
-				sendAlert(fmt.Sprintf("🔴 节点离线告警\nID: %s\nName: %s\nIP: %s", s.AgentID, s.Name, s.IP))
-			} else if !isOffline && alreadyAlerted {
-				alertState[id] = false
-				sendAlert(fmt.Sprintf("🟢 节点恢复上线\nID: %s\nName: %s", s.AgentID, s.Name))
-			}
-		}
-		cacheMutex.RUnlock()
+// randomToken 生成一个 24 位十六进制随机串，用于首次运行时的 Agent 通信 Token。
+//
+// 为什么不写死一个「默认 Token」：面板的 /api/report 只认这个 Token，
+// 而它是公开仓库里可见的常量 —— 任何知道默认值的人都能往面板里塞伪造节点、
+// 或反过来读取下发给节点的 Ping 目标。首次运行随机生成并落库，
+// 之后每次启动都从数据库读同一个值，Agent 不会因为重启而掉线。
+func randomToken() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("tok-%d", time.Now().UnixNano())
 	}
+	return hex.EncodeToString(b)
 }
 
-func cleanupHistory() {
-	for {
-		time.Sleep(1 * time.Hour)
-		db.Where("created_at < ?", time.Now().Add(-24*time.Hour)).Delete(&MonitorHistory{})
+func randomEpoch() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
-}
-
-func sendAlert(msg string) {
-	globalConfig.RLock()
-	token := globalConfig.TGToken
-	chat := globalConfig.TGChatID
-	wh := globalConfig.WebhookURL
-	globalConfig.RUnlock()
-
-	// Telegram
-	if token != "" && chat != "" {
-		http.PostForm(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token), map[string][]string{"chat_id": {chat}, "text": {msg}})
-	}
-
-	// Webhook (JSON)
-	if wh != "" {
-		payload := map[string]string{"content": msg, "text": msg} // 兼容 discord/dingtalk
-		b, _ := json.Marshal(payload)
-		http.Post(wh, "application/json", bytes.NewBuffer(b))
-	}
+	return hex.EncodeToString(b)
 }
 
 func loadGlobalConfig() {
 	var cfgs []AppConfig
 	db.Find(&cfgs)
-	globalConfig.Token = "default-token"
+
+	// 先全部置为「代码内置默认值」，再用数据库里已有的值覆盖。
+	// 这样新增配置项时，老库不需要迁移脚本也能拿到合理默认值。
+	globalConfig.Token = ""
 	globalConfig.BgType = "default"
 	globalConfig.CardOpacity = 0.9   // 默认值
 	globalConfig.CardPadding = 10    // 默认值
 	globalConfig.SiteTheme = "light" // 默认亮色
+	// 告警规则默认值：离线告警开、资源阈值开，冷却 0 表示「只在状态翻转时通知一次」
+	globalConfig.AlertEnabled = true
+	globalConfig.AlertOffline = true
+	globalConfig.AlertOfflineSec = 30
+	globalConfig.AlertCooldownMin = 0
+	globalConfig.AlertCPU = 90
+	globalConfig.AlertMem = 90
+	globalConfig.AlertDisk = 90
+	globalConfig.AlertKeepDays = 30
+	globalConfig.HistoryKeepHours = 24
+	globalConfig.AuditKeepDays = 90
+	globalConfig.SessionEpoch = ""
 	defaultTargets := []PingTargetConfig{{Target: "8.8.8.8:53", Alias: "Google DNS"}}
 
+	seen := make(map[string]bool, len(cfgs))
 	for _, c := range cfgs {
+		seen[c.Key] = true
 		switch c.Key {
 		case "token":
 			globalConfig.Token = c.Value
@@ -1016,6 +1149,8 @@ func loadGlobalConfig() {
 			globalConfig.TGChatID = c.Value
 		case "webhook_url":
 			globalConfig.WebhookURL = c.Value
+		case "webhook_format":
+			globalConfig.WebhookFormat = c.Value
 		case "site_theme":
 			globalConfig.SiteTheme = c.Value
 		case "bg_type":
@@ -1039,13 +1174,69 @@ func loadGlobalConfig() {
 			globalConfig.RestartCmd = c.Value
 		case "agent_bundle_version":
 			globalConfig.AgentBundleVersion = c.Value
+		// === 告警规则 ===
+		case "alert_enabled":
+			globalConfig.AlertEnabled, _ = strconv.ParseBool(c.Value)
+		case "alert_offline":
+			globalConfig.AlertOffline, _ = strconv.ParseBool(c.Value)
+		case "alert_offline_sec":
+			globalConfig.AlertOfflineSec, _ = strconv.Atoi(c.Value)
+		case "alert_cooldown_min":
+			globalConfig.AlertCooldownMin, _ = strconv.Atoi(c.Value)
+		case "alert_cpu":
+			globalConfig.AlertCPU, _ = strconv.ParseFloat(c.Value, 64)
+		case "alert_mem":
+			globalConfig.AlertMem, _ = strconv.ParseFloat(c.Value, 64)
+		case "alert_disk":
+			globalConfig.AlertDisk, _ = strconv.ParseFloat(c.Value, 64)
+		case "alert_keep_days":
+			globalConfig.AlertKeepDays, _ = strconv.Atoi(c.Value)
+		// === 数据保留 ===
+		case "history_keep_hours":
+			globalConfig.HistoryKeepHours, _ = strconv.Atoi(c.Value)
+		case "audit_keep_days":
+			globalConfig.AuditKeepDays, _ = strconv.Atoi(c.Value)
+		// === 会话版本 ===
+		case "session_epoch":
+			globalConfig.SessionEpoch = c.Value
 		}
 	}
+
 	if len(globalConfig.PingTargets) == 0 {
 		globalConfig.PingTargets = defaultTargets
 	}
-	if len(cfgs) == 0 {
-		saveConfig("token", "default-token")
+	// Token 缺失时立刻生成并落库。
+	// 注意不能只写在内存里：否则每次重启都会换一个 Token，全部 Agent 一起掉线。
+	if globalConfig.Token == "" {
+		globalConfig.Token = randomToken()
+		saveConfig("token", globalConfig.Token)
+	}
+	if globalConfig.SessionEpoch == "" {
+		globalConfig.SessionEpoch = randomEpoch()
+		saveConfig("session_epoch", globalConfig.SessionEpoch)
+	}
+	if !seen["sys_ping_targets"] {
+		if b, err := json.Marshal(globalConfig.PingTargets); err == nil {
+			saveConfig("sys_ping_targets", string(b))
+		}
+	}
+	// 把内置默认值写进库，让「系统管理」里的表单能读到与实际生效一致的值
+	defaults := map[string]string{
+		"alert_enabled":      strconv.FormatBool(globalConfig.AlertEnabled),
+		"alert_offline":      strconv.FormatBool(globalConfig.AlertOffline),
+		"alert_offline_sec":  strconv.Itoa(globalConfig.AlertOfflineSec),
+		"alert_cooldown_min": strconv.Itoa(globalConfig.AlertCooldownMin),
+		"alert_cpu":          strconv.FormatFloat(globalConfig.AlertCPU, 'f', -1, 64),
+		"alert_mem":          strconv.FormatFloat(globalConfig.AlertMem, 'f', -1, 64),
+		"alert_disk":         strconv.FormatFloat(globalConfig.AlertDisk, 'f', -1, 64),
+		"alert_keep_days":    strconv.Itoa(globalConfig.AlertKeepDays),
+		"history_keep_hours": strconv.Itoa(globalConfig.HistoryKeepHours),
+		"audit_keep_days":    strconv.Itoa(globalConfig.AuditKeepDays),
+	}
+	for k, v := range defaults {
+		if !seen[k] {
+			saveConfig(k, v)
+		}
 	}
 }
 
@@ -1054,8 +1245,7 @@ func saveConfig(k, v string) {
 }
 
 func dashboardHandler(c *gin.Context) {
-	s := sessions.Default(c)
-	isAdmin := s.Get("user") != nil
+	isAdmin := isAdminSession(c)
 	t, _ := template.New("d").Parse(htmlDashboard)
 	sch := "http://"
 	if c.Request.TLS != nil {
@@ -1068,6 +1258,7 @@ func dashboardHandler(c *gin.Context) {
 	tgt := globalConfig.TGToken
 	tgc := globalConfig.TGChatID
 	wh := globalConfig.WebhookURL
+	whFmt := globalConfig.WebhookFormat
 	bgType := globalConfig.BgType
 	bgUrl := globalConfig.BgCustomURL
 	bgBlur := globalConfig.BgBlur
@@ -1094,9 +1285,14 @@ func dashboardHandler(c *gin.Context) {
 	if repo == "" {
 		repo = defaultRepo
 	}
+	if whFmt == "" {
+		whFmt = "generic"
+	}
 
 	t.Execute(c.Writer, map[string]interface{}{
 		"BrowserURL": sch + c.Request.Host, "CustomServerURL": u, "Token": tk, "TGToken": tgt, "TGChatID": tgc, "WebhookURL": wh,
+		"WebhookFormat": whFmt, "BcryptCost": bcryptCost,
+		"AdminName":   currentUser(c),
 		"DownloadURL": "/api/download", "IsAdmin": isAdmin,
 		// 安装命令模板：前端用它为已有节点生成命令，与后端 installCommand() 同源
 		"InstallTmpl": installCmdTmpl,
@@ -1118,7 +1314,14 @@ func authMiddleware() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if sessions.Default(c).Get("user") == nil {
+		if !isAdminSession(c) {
+			// 会话失效（未登录 / Cookie 过期 / 改密码后 epoch 变更）一律回登录页。
+			// 这里顺手把脏 Cookie 清掉，避免浏览器带着一份永远无效的会话反复重试。
+			s := sessions.Default(c)
+			if s.Get("user") != nil {
+				s.Clear()
+				s.Save()
+			}
 			c.Redirect(302, "/login")
 			c.Abort()
 			return
@@ -1127,24 +1330,58 @@ func authMiddleware() gin.HandlerFunc {
 	}
 }
 
-// 安全增强: 加盐哈希
+// ================= 密码存储 =================
+//
+// 早期版本用的是「随机盐 + 单轮 SHA-256」。它的问题不在于加没加盐，
+// 而在于 SHA-256 是为速度设计的：一张消费级显卡每秒能算上百亿次，
+// 一旦数据库泄露（备份文件、误挂载的卷），口令基本等于明文。
+//
+// 现在改用 bcrypt：内置盐、可调工作因子，天生抗暴力破解。
+// 为兼容老库，checkPwd 仍能识别旧的 salt$sha256 格式，
+// 并在登录成功的那一刻原地升级为 bcrypt —— 用户不需要重置密码。
+
+// bcryptCost 12 在现代 CPU 上单次约 200~300ms：
+// 登录体验几乎无感，但把离线爆破的成本抬高了几个数量级。
+const bcryptCost = 12
+
+// 安全增强: 密码哈希（bcrypt）
 func hashPwd(password string) string {
-	salt := make([]byte, 16)
-	rand.Read(salt)
-	hash := sha256.Sum256(append(salt, []byte(password)...))
-	return hex.EncodeToString(salt) + "$" + hex.EncodeToString(hash[:])
+	h, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil {
+		// 理论上不会失败；真失败时退回旧格式，保证功能不中断
+		salt := make([]byte, 16)
+		rand.Read(salt)
+		sum := sha256.Sum256(append(salt, []byte(password)...))
+		return hex.EncodeToString(salt) + "$" + hex.EncodeToString(sum[:])
+	}
+	return string(h)
 }
 
-// 安全增强: 校验密码
+// checkPwd 校验密码；第二个返回值表示「该哈希是旧格式，应升级」
 func checkPwd(password, stored string) bool {
+	ok, _ := checkPwdUpgrade(password, stored)
+	return ok
+}
+
+func checkPwdUpgrade(password, stored string) (bool, bool) {
+	if strings.HasPrefix(stored, "$2a$") || strings.HasPrefix(stored, "$2b$") || strings.HasPrefix(stored, "$2y$") {
+		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(password)) == nil, false
+	}
+	// 旧格式：salt$sha256
 	parts := strings.Split(stored, "$")
 	if len(parts) != 2 {
-		return false
+		return false, false
 	}
-	salt, _ := hex.DecodeString(parts[0])
-	expectedHash, _ := hex.DecodeString(parts[1])
+	salt, err1 := hex.DecodeString(parts[0])
+	expectedHash, err2 := hex.DecodeString(parts[1])
+	if err1 != nil || err2 != nil {
+		return false, false
+	}
 	actualHash := sha256.Sum256(append(salt, []byte(password)...))
-	return subtle.ConstantTimeCompare(expectedHash, actualHash[:]) == 1
+	if subtle.ConstantTimeCompare(expectedHash, actualHash[:]) != 1 {
+		return false, false
+	}
+	return true, true
 }
 
 // cleanField 剔除控制字符并截断到指定长度

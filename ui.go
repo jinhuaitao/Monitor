@@ -483,6 +483,121 @@ body{
 ::-webkit-scrollbar-thumb{background:var(--track);border-radius:99px;border:2px solid transparent;background-clip:padding-box}
 ::-webkit-scrollbar-thumb:hover{background:rgba(100,116,139,.45);background-clip:padding-box}
 
+/* ---------- 系统管理 · 增强组件 ---------- */
+
+/* 侧边栏分组标题：把 10 个面板按「监控 / 运维 / 系统」切开，
+   否则一长条按钮列表扫起来很累 */
+.side-sec{
+  font-size:10px;font-weight:800;letter-spacing:.9px;text-transform:uppercase;
+  color:var(--text-mute);padding:14px 14px 6px;user-select:none;
+}
+.side-sec:first-child{padding-top:2px}
+
+/* 概览指标格 */
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:11px;margin-bottom:16px}
+.stat{background:var(--soft);border:1px solid var(--soft-2);border-radius:var(--r-md);padding:13px 15px;transition:.22s}
+.stat:hover{background:var(--soft-2);border-color:rgba(99,102,241,.25);transform:translateY(-1px)}
+.stat-k{font-size:10.5px;font-weight:700;letter-spacing:.4px;color:var(--text-sub);text-transform:uppercase;margin-bottom:7px;display:flex;align-items:center;gap:6px}
+.stat-v{font-size:19px;font-weight:800;letter-spacing:-.5px;font-variant-numeric:tabular-nums;line-height:1.15}
+.stat-v small{font-size:11.5px;font-weight:600;color:var(--text-mute);margin-left:3px;letter-spacing:0}
+.stat-s{font-size:11px;color:var(--text-mute);margin-top:5px;line-height:1.45}
+
+/* 键值清单 */
+.kv{display:grid;grid-template-columns:120px 1fr}
+.kv>div{padding:9px 0;border-bottom:1px solid var(--soft-2);min-width:0}
+.kv>div:nth-last-child(-n+2){border-bottom:none}
+.kv-k{color:var(--text-sub);font-weight:600;font-size:12.5px}
+.kv-v{font-family:'Menlo',monospace;font-size:12px;word-break:break-all;color:var(--text-main)}
+
+/* 开关 */
+.switch{display:inline-flex;align-items:center;gap:10px;cursor:pointer;user-select:none;font-size:13px;font-weight:600;color:var(--text-main)}
+.switch input{display:none}
+.switch .track{width:42px;height:24px;border-radius:99px;background:var(--track);position:relative;transition:background .25s;flex-shrink:0}
+.switch .track::after{
+  content:'';position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;
+  background:#fff;box-shadow:0 2px 6px rgba(15,23,42,.3);transition:transform .25s cubic-bezier(.2,.8,.3,1.3);
+}
+.switch input:checked+.track{background:linear-gradient(135deg,var(--primary),var(--primary-2))}
+.switch input:checked+.track::after{transform:translateX(18px)}
+.switch input:disabled+.track{opacity:.45}
+
+/* 阈值行 */
+.thresh-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid var(--soft-2)}
+.thresh-row:last-child{border-bottom:none}
+.thresh-label{flex:1;min-width:130px;font-size:13px;font-weight:600}
+.thresh-label small{display:block;font-weight:500;color:var(--text-mute);font-size:11px;margin-top:2px;line-height:1.5}
+.thresh-input{width:88px;text-align:center}
+
+/* 数据表格 */
+.tbl-wrap{overflow:auto;max-height:460px;border:1px solid var(--soft-2);border-radius:var(--r-md);background:var(--soft)}
+table.tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+table.tbl th{
+  text-align:left;padding:10px 13px;font-size:10.5px;font-weight:800;letter-spacing:.5px;
+  text-transform:uppercase;color:var(--text-sub);background:var(--soft-2);white-space:nowrap;
+  position:sticky;top:0;z-index:1;
+}
+table.tbl td{padding:10px 13px;border-top:1px solid var(--soft-2);vertical-align:top;line-height:1.5}
+table.tbl tr:hover td{background:var(--soft-2)}
+table.tbl td.mono{font-family:'Menlo',monospace;font-size:11.5px;white-space:nowrap}
+.tbl-empty{text-align:center;color:var(--text-mute);padding:34px 16px !important}
+
+/* 分页 */
+.pager{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:13px;flex-wrap:wrap}
+.pager-info{font-size:12px;color:var(--text-mute)}
+.pager-btns{display:flex;gap:7px;align-items:center}
+
+/* 子分区标题 */
+.sub-sec{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+  margin:24px 0 12px;padding-top:18px;border-top:1px solid var(--soft-2);
+}
+.sub-sec:first-of-type{margin-top:0;padding-top:0;border-top:none}
+.sub-sec h5{margin:0;font-size:14px;font-weight:700;display:flex;align-items:center;gap:8px}
+
+/* 批量操作条 */
+.bulk-bar{
+  display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:11px 14px;margin-bottom:13px;
+  background:linear-gradient(135deg,rgba(79,70,229,.09),rgba(139,92,246,.05));
+  border:1px solid rgba(79,70,229,.18);border-radius:var(--r-md);
+}
+.bulk-count{font-size:12.5px;font-weight:700;color:var(--primary);min-width:76px}
+
+/* 节点行增强 */
+.node-row .pick{width:16px;height:16px;accent-color:var(--primary);cursor:pointer;flex-shrink:0}
+.node-row .g-chip{font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:99px;background:var(--soft-2);color:var(--text-sub);white-space:nowrap}
+.node-row .g-chip.maint{background:rgba(245,158,11,.16);color:var(--warning)}
+.node-row .g-chip.mute{background:rgba(148,163,184,.22);color:var(--text-sub)}
+
+/* 分组筛选 */
+.filter-bar{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px}
+.filter-chip{
+  font-size:12px;font-weight:600;padding:5px 13px;border-radius:99px;cursor:pointer;
+  background:var(--soft);border:1px solid var(--soft-2);color:var(--text-sub);transition:.2s;
+}
+.filter-chip:hover{background:var(--soft-2);color:var(--text-main)}
+.filter-chip.on{background:linear-gradient(135deg,var(--primary),var(--primary-2));color:#fff;border-color:transparent}
+
+/* 密码强度 */
+.strength{height:5px;border-radius:99px;background:var(--track);overflow:hidden;margin-top:9px}
+.strength i{display:block;height:100%;width:0;border-radius:99px;transition:width .3s,background .3s}
+.strength-tip{font-size:11.5px;color:var(--text-mute);margin-top:6px;min-height:16px}
+
+/* 告警等级色点 */
+.lv{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;white-space:nowrap}
+.lv i{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
+.lv.critical{color:var(--danger)}
+.lv.warning{color:var(--warning)}
+.lv.info{color:var(--success)}
+
+/* 描边按钮的「已激活」态。
+   不能复用 .btn-warn：.btn-outline 在样式表里定义得更靠后，
+   同优先级下它的 background 会反过来盖住 .btn-warn，高亮完全不生效 */
+.btn-outline.on-warn{
+  background:linear-gradient(135deg,rgba(245,158,11,.20),rgba(245,158,11,.08));
+  border-color:rgba(245,158,11,.5);color:#b45309;
+}
+[data-theme="dark"] .btn-outline.on-warn{color:#fbbf24}
+
 /* ---------- 响应式 ---------- */
 @media (max-width:900px){
   .node-grid{grid-template-columns:1fr}
@@ -498,6 +613,9 @@ body{
   .info-grid{grid-template-columns:1fr;gap:10px}
   .charts-row{flex-direction:column}
   .chart-box{height:170px}
+  .kv{grid-template-columns:96px 1fr}
+  .stat-grid{grid-template-columns:repeat(auto-fit,minmax(132px,1fr))}
+  .tbl-wrap{max-height:none}
   /* 窄屏下列表视图回退为竖向堆叠 */
   .node-grid.list-view .node-card{grid-template-columns:1fr;grid-template-areas:"head" "metrics" "foot";row-gap:7px}
   .node-grid.list-view .nc-metrics{margin:0}
@@ -524,6 +642,17 @@ body{
   .modal{max-height:94vh}
   .node-row,.upd-node{flex-direction:column;align-items:stretch}
   .node-row>div:last-child,.upd-node>div:last-child{justify-content:flex-end}
+  .kv{grid-template-columns:1fr}
+  .kv>div{border-bottom:none;padding:4px 0}
+  .kv>div:nth-child(odd){padding-bottom:0}
+  .kv>div:nth-child(even){padding-top:0;padding-bottom:11px;border-bottom:1px solid var(--soft-2)}
+  .kv>div:nth-last-child(-n+2){border-bottom:none;padding-bottom:4px}
+  .stat-grid{grid-template-columns:repeat(2,1fr);gap:9px}
+  .stat-v{font-size:17px}
+  .sidebar{gap:6px}
+  /* 窄屏侧边栏变成横向滚动条，分组标题在这里只会占位，直接隐藏 */
+  .side-sec{display:none}
+  table.tbl th,table.tbl td{padding:8px 10px}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
@@ -597,20 +726,74 @@ body{
     </div>
     <div class="modal-body">
       <div class="sidebar">
-        <button class="sidebar-btn active" data-tab="nodes" onclick="switchTab('nodes')">🖥️ 节点列表</button>
+        <div class="side-sec">监控</div>
+        <button class="sidebar-btn active" data-tab="overview" onclick="switchTab('overview')">📊 运行概览</button>
+        <button class="sidebar-btn" data-tab="nodes" onclick="switchTab('nodes')">🖥️ 节点管理</button>
         <button class="sidebar-btn" data-tab="targets" onclick="switchTab('targets')">🎯 监控目标</button>
+        <button class="sidebar-btn" data-tab="alert" onclick="switchTab('alert')">🔔 告警设置</button>
+        <div class="side-sec">运维</div>
         <button class="sidebar-btn" data-tab="update" onclick="switchTab('update')">🔄 版本更新</button>
+        <button class="sidebar-btn" data-tab="install" onclick="switchTab('install')">➕ 接入节点</button>
+        <button class="sidebar-btn" data-tab="data" onclick="switchTab('data')">🗄️ 数据管理</button>
+        <div class="side-sec">系统</div>
         <button class="sidebar-btn" data-tab="appearance" onclick="switchTab('appearance')">🎨 外观设置</button>
-        <button class="sidebar-btn" data-tab="install" onclick="switchTab('install')">➕ 添加节点</button>
-        <button class="sidebar-btn" data-tab="alert" onclick="switchTab('alert')">🔔 告警通知</button>
+        <button class="sidebar-btn" data-tab="account" onclick="switchTab('account')">🔐 账号安全</button>
+        <button class="sidebar-btn" data-tab="audit" onclick="switchTab('audit')">📜 操作日志</button>
         <div class="side-foot">Hub Monitor · 轻量服务器监控<br>修改即时生效，无需重启</div>
       </div>
 
       <div class="content-area">
-        <!-- 节点列表 -->
-        <div id="tab-nodes" class="tab-content active">
+        <!-- 运行概览 -->
+        <div id="tab-overview" class="tab-content active">
+          <h4 class="sec-title">运行概览 <span class="sec-sub">面板与节点的整体健康度</span></h4>
+          <div class="stat-grid" id="sysStats"></div>
+          <div class="sub-sec">
+            <h5>🧩 面板运行环境</h5>
+            <button class="btn-outline btn-sm" onclick="loadSystemInfo()">刷新</button>
+          </div>
+          <div class="card-soft"><div class="kv" id="sysKv"></div></div>
+          <div class="sub-sec"><h5>🚨 最近告警</h5></div>
+          <div class="tbl-wrap">
+            <table class="tbl">
+              <thead><tr><th style="width:150px">时间</th><th style="width:110px">节点</th><th style="width:90px">级别</th><th>内容</th></tr></thead>
+              <tbody id="ovAlertBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 节点管理 -->
+        <div id="tab-nodes" class="tab-content">
           <h4 class="sec-title">节点管理 <span class="sec-sub" id="nodeCount"></span></h4>
           <div class="form-hint">💡 删除节点后，如果该节点仍在线，它将收到「停止指令」并自动执行自毁程序。</div>
+
+          <div class="filter-bar" id="groupFilter"></div>
+
+          <div class="bulk-bar">
+            <label class="switch" style="gap:8px">
+              <input type="checkbox" id="pickAll" onchange="togglePickAll(this.checked)">
+              <span class="track"></span>
+            </label>
+            <span class="bulk-count" id="pickCount">已选 0 个</span>
+            <select id="bulkAction" class="mini-select" style="padding:7px 12px">
+              <option value="">批量操作…</option>
+              <option value="group">设置分组</option>
+              <option value="hide">隐藏 ID</option>
+              <option value="unhide">显示 ID</option>
+              <option value="maintenance_on">开启维护模式</option>
+              <option value="maintenance_off">关闭维护模式</option>
+              <option value="mute_on">静音告警</option>
+              <option value="mute_off">取消静音</option>
+              <option value="update">下发客户端更新</option>
+              <option value="delete">删除节点</option>
+            </select>
+            <input type="text" id="bulkGroupValue" class="input-text" style="width:130px;padding:7px 11px;display:none" placeholder="分组名称">
+            <button class="btn-primary btn-sm" onclick="runBulk()">执行</button>
+          </div>
+
+          <div class="form-hint" style="margin-bottom:12px">
+            <b>维护模式</b>：期间完全不触发任何告警（适合计划内重启、迁移）。<b>静音告警</b>：节点仍正常显示与统计，只是不发通知。
+          </div>
+
           <div id="nodeList"></div>
         </div>
 
@@ -753,9 +936,77 @@ body{
           <div class="form-hint" id="installArchHint" style="margin-top:10px"></div>
         </div>
 
-        <!-- 告警 -->
+        <!-- 告警设置 -->
         <div id="tab-alert" class="tab-content">
-          <h4 class="sec-title">告警配置</h4>
+          <h4 class="sec-title">告警设置 <span class="sec-sub">规则决定「什么时候报」，通道决定「报到哪」</span></h4>
+
+          <div class="sub-sec"><h5>⚙️ 告警规则</h5>
+            <button class="btn-primary btn-sm" onclick="saveAlertRules()">保存规则</button>
+          </div>
+
+          <div class="card-soft">
+            <div class="thresh-row">
+              <label class="switch" style="flex:1;min-width:200px">
+                <input type="checkbox" id="ruleEnabled">
+                <span class="track"></span>
+                <span>启用告警引擎
+                  <small style="display:block;font-weight:500;color:var(--text-mute);font-size:11px;margin-top:2px">总开关，关闭后不再产生任何告警通知与记录</small>
+                </span>
+              </label>
+            </div>
+            <div class="thresh-row">
+              <label class="switch" style="flex:1;min-width:200px">
+                <input type="checkbox" id="ruleOffline">
+                <span class="track"></span>
+                <span>节点离线告警
+                  <small style="display:block;font-weight:500;color:var(--text-mute);font-size:11px;margin-top:2px">失联超过判定时长即告警，恢复时同样推送通知</small>
+                </span>
+              </label>
+              <input type="number" id="ruleOfflineSec" class="input-text thresh-input" min="15" max="86400" placeholder="30">
+              <span style="font-size:12.5px;color:var(--text-sub)">秒</span>
+            </div>
+            <div class="thresh-row">
+              <span class="thresh-label">重复提醒间隔
+                <small>0 = 仅在状态变化时通知一次；大于 0 则持续告警每隔该时长再提醒一次</small>
+              </span>
+              <input type="number" id="ruleCooldown" class="input-text thresh-input" min="0" max="1440" placeholder="0">
+              <span style="font-size:12.5px;color:var(--text-sub)">分钟</span>
+            </div>
+          </div>
+
+          <div class="card-soft">
+            <div class="form-label" style="margin-bottom:4px">资源阈值告警</div>
+            <div class="form-hint" style="margin-bottom:8px">填 <b>0</b> 表示关闭该项。阈值按百分比计，节点离线期间不参与判定（避免拿上一次的残留值误报）。</div>
+            <div class="thresh-row">
+              <span class="thresh-label">CPU 使用率</span>
+              <input type="number" id="ruleCpu" class="input-text thresh-input" min="0" max="100" step="1" placeholder="90">
+              <span style="font-size:12.5px;color:var(--text-sub)">%</span>
+            </div>
+            <div class="thresh-row">
+              <span class="thresh-label">内存使用率</span>
+              <input type="number" id="ruleMem" class="input-text thresh-input" min="0" max="100" step="1" placeholder="90">
+              <span style="font-size:12.5px;color:var(--text-sub)">%</span>
+            </div>
+            <div class="thresh-row">
+              <span class="thresh-label">磁盘使用率</span>
+              <input type="number" id="ruleDisk" class="input-text thresh-input" min="0" max="100" step="1" placeholder="90">
+              <span style="font-size:12.5px;color:var(--text-sub)">%</span>
+            </div>
+            <div class="thresh-row">
+              <span class="thresh-label">告警历史保留
+                <small>超过保留期的告警记录会被后台任务自动清理</small>
+              </span>
+              <input type="number" id="ruleKeepDays" class="input-text thresh-input" min="1" max="3650" placeholder="30">
+              <span style="font-size:12.5px;color:var(--text-sub)">天</span>
+            </div>
+          </div>
+
+          <div class="sub-sec"><h5>📮 通知通道</h5>
+            <div class="row">
+              <button class="btn-primary" onclick="saveAlert()">保存通道</button>
+              <button class="btn-primary btn-success" onclick="testAlert()">发送测试</button>
+            </div>
+          </div>
           <div class="card-soft">
             <div class="form-group">
               <label class="form-label">Telegram Bot Token</label>
@@ -767,14 +1018,186 @@ body{
             </div>
           </div>
           <div class="card-soft">
-            <div class="form-group" style="margin-bottom:0">
-              <label class="form-label">通用 Webhook（钉钉 / 飞书 / Discord / Slack）</label>
+            <div class="form-group">
+              <label class="form-label">Webhook 地址</label>
               <input type="text" id="webhookUrl" class="input-text" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
             </div>
+            <div class="form-group" style="margin-bottom:0">
+              <label class="form-label">Webhook 消息格式</label>
+              <select id="webhookFormat" class="input-text">
+                <option value="generic">通用（同时带 content 与 text）</option>
+                <option value="dingtalk">钉钉机器人</option>
+                <option value="feishu">飞书自定义机器人</option>
+                <option value="discord">Discord</option>
+                <option value="slack">Slack</option>
+              </select>
+              <div class="form-hint" style="margin-top:10px;margin-bottom:0">
+                各平台要求的 JSON 结构并不相同：钉钉要 <code>text.content</code>、飞书要 <code>content.text</code>、Slack 只认 <code>text</code>。选错格式时对方会返回 400，消息一条都收不到。
+              </div>
+            </div>
           </div>
-          <div class="row">
-            <button class="btn-primary" onclick="saveAlert()">保存配置</button>
-            <button class="btn-primary btn-success" onclick="testAlert()">发送测试</button>
+
+          <div class="sub-sec"><h5>🕘 告警历史</h5>
+            <div class="row">
+              <select id="alertHistoryKind" class="mini-select" style="padding:7px 12px" onchange="loadAlertHistory()">
+                <option value="all">全部类型</option>
+                <option value="offline">离线</option>
+                <option value="cpu">CPU</option>
+                <option value="mem">内存</option>
+                <option value="disk">磁盘</option>
+              </select>
+              <button class="btn-outline btn-sm" onclick="clearAlertHistory()">清理历史</button>
+            </div>
+          </div>
+          <div id="alertKindSummary" class="filter-bar"></div>
+          <div class="tbl-wrap">
+            <table class="tbl">
+              <thead><tr><th style="width:150px">时间</th><th style="width:130px">节点</th><th style="width:90px">类型</th><th style="width:90px">级别</th><th>内容</th></tr></thead>
+              <tbody id="alertHistoryBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 数据管理 -->
+        <div id="tab-data" class="tab-content">
+          <h4 class="sec-title">数据管理 <span class="sec-sub">存储占用、保留策略与备份</span></h4>
+
+          <div class="stat-grid" id="dataStats"></div>
+
+          <div class="sub-sec"><h5>🧹 保留策略</h5>
+            <button class="btn-primary btn-sm" onclick="saveRetention()">保存策略</button>
+          </div>
+          <div class="card-soft">
+            <div class="thresh-row">
+              <span class="thresh-label">监控历史保留
+                <small>CPU / 内存 / 磁盘 / 延迟的采样点。面板每 5 秒上报一次，保留期越长占用越大</small>
+              </span>
+              <input type="number" id="keepHours" class="input-text thresh-input" min="1" max="8760" placeholder="24">
+              <span style="font-size:12.5px;color:var(--text-sub)">小时</span>
+            </div>
+            <div class="thresh-row">
+              <span class="thresh-label">操作日志保留</span>
+              <input type="number" id="keepAuditDays" class="input-text thresh-input" min="1" max="3650" placeholder="90">
+              <span style="font-size:12.5px;color:var(--text-sub)">天</span>
+            </div>
+            <div class="thresh-row">
+              <span class="thresh-label">告警历史保留</span>
+              <input type="number" id="keepAlertDays" class="input-text thresh-input" min="1" max="3650" placeholder="30">
+              <span style="font-size:12.5px;color:var(--text-sub)">天</span>
+            </div>
+          </div>
+
+          <div class="sub-sec"><h5>📤 导出与备份</h5></div>
+          <div class="card-soft">
+            <div class="form-hint" style="margin-top:0">
+              导出的 CSV 带 UTF-8 BOM，可直接用 Excel 打开而不乱码。<br>
+              <b>数据库备份</b>走的是 SQLite 原生的 <code>VACUUM INTO</code>：在读事务里取快照，
+              <b>不需要停服务</b>，产出的也是已合并 WAL 的单文件。直接 <code>cp monitor.db</code> 在 WAL 未合并时可能拷到一个空库。
+            </div>
+            <div class="row" style="margin-top:14px">
+              <button class="btn-outline" onclick="exportData('history','csv')">导出监控历史 CSV</button>
+              <button class="btn-outline" onclick="exportData('history','json')">导出监控历史 JSON</button>
+              <button class="btn-outline" onclick="exportData('audit','csv')">导出操作日志 CSV</button>
+              <button class="btn-outline" onclick="exportData('alert','csv')">导出告警历史 CSV</button>
+            </div>
+            <div class="row" style="margin-top:12px">
+              <button class="btn-primary btn-success" onclick="downloadBackup()">⬇️ 下载数据库备份</button>
+            </div>
+            <div id="backupMsg" class="update-msg"></div>
+          </div>
+
+          <div class="sub-sec"><h5>⚠️ 危险操作</h5></div>
+          <div class="card-soft">
+            <div class="form-hint" style="margin-top:0">以下操作不可撤销。建议先下载一份数据库备份。</div>
+            <div class="row" style="margin-top:14px">
+              <button class="btn-outline" onclick="runCleanup('expired')">按策略清理监控历史</button>
+              <button class="btn-outline" onclick="runCleanup('alerts')">清空告警历史</button>
+              <button class="btn-outline" style="color:var(--danger);border-color:rgba(239,68,68,.35)" onclick="runCleanup('all')">清空全部监控历史</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 账号安全 -->
+        <div id="tab-account" class="tab-content">
+          <h4 class="sec-title">账号安全 <span class="sec-sub">登录凭证与访问控制</span></h4>
+
+          <div class="sub-sec"><h5>🔑 修改密码</h5></div>
+          <div class="card-soft">
+            <div class="form-group">
+              <label class="form-label">当前密码</label>
+              <input type="password" id="pwdOld" class="input-text" autocomplete="current-password">
+            </div>
+            <div class="form-group">
+              <label class="form-label">新密码</label>
+              <input type="password" id="pwdNew" class="input-text" autocomplete="new-password" oninput="renderStrength(this.value)">
+              <div class="strength"><i id="pwdBar"></i></div>
+              <div class="strength-tip" id="pwdTip">至少 8 位，需包含大写字母、小写字母、数字、符号中的至少两类</div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">确认新密码</label>
+              <input type="password" id="pwdConfirm" class="input-text" autocomplete="new-password">
+            </div>
+            <div class="form-hint">
+              保存后<b>当前设备与所有其它设备上的登录状态会立即失效</b>，需要用新密码重新登录。
+              密码以 bcrypt（cost {{ .BcryptCost }}）存储，老版本遗留的 SHA-256 哈希会在下次登录成功时自动升级。
+            </div>
+            <button class="btn-primary" onclick="changePassword()">更新密码</button>
+          </div>
+
+          <div class="sub-sec"><h5>👤 管理员账号</h5></div>
+          <div class="card-soft">
+            <div class="form-group">
+              <label class="form-label">用户名</label>
+              <input type="text" id="accountName" class="input-text" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label class="form-label">当前密码（用于确认身份）</label>
+              <input type="password" id="accountPwd" class="input-text" autocomplete="current-password">
+            </div>
+            <button class="btn-outline" onclick="changeUsername()">更新用户名</button>
+          </div>
+
+          <div class="sub-sec"><h5>🛡️ 登录保护</h5>
+            <button class="btn-outline btn-sm" onclick="loadSecurity()">刷新</button>
+          </div>
+          <div class="card-soft">
+            <div class="form-hint" style="margin-top:0" id="securityHint"></div>
+            <div class="row" style="margin-bottom:12px">
+              <button class="btn-outline btn-sm" onclick="unlockAll()">解除全部登录锁定</button>
+            </div>
+            <div class="tbl-wrap" style="max-height:280px">
+              <table class="tbl">
+                <thead><tr><th>来源 IP</th><th style="width:90px">失败次数</th><th style="width:110px">状态</th><th style="width:170px">首次失败</th><th style="width:90px"></th></tr></thead>
+                <tbody id="securityBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- 操作日志 -->
+        <div id="tab-audit" class="tab-content">
+          <h4 class="sec-title">操作日志 <span class="sec-sub">谁、什么时候、改了什么</span></h4>
+          <div class="form-hint">
+            面板的「下发客户端更新」落到节点后会以 <b>root 身份替换二进制并重启服务</b>。因此改 Token、改更新源、下发更新这类动作都会在这里留痕 —— 出问题时它是唯一的回溯依据。
+          </div>
+          <div class="row" style="margin:14px 0">
+            <input type="text" id="auditQuery" class="input-text" style="flex:1;min-width:150px" placeholder="搜索操作者 / 对象 / 详情 / IP…" onkeydown="if(event.key==='Enter')loadAudit(1)">
+            <select id="auditAction" class="mini-select" style="padding:9px 12px"></select>
+            <button class="btn-primary btn-sm" onclick="loadAudit(1)">查询</button>
+            <button class="btn-outline btn-sm" onclick="clearAudit()">清理</button>
+          </div>
+          <div class="tbl-wrap">
+            <table class="tbl">
+              <thead><tr><th style="width:150px">时间</th><th style="width:110px">操作者</th><th style="width:130px">来源 IP</th><th style="width:120px">动作</th><th>详情</th></tr></thead>
+              <tbody id="auditBody"></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <span class="pager-info" id="auditInfo">—</span>
+            <span class="pager-btns">
+              <button class="btn-outline btn-sm" id="auditPrev" onclick="loadAudit(auditPage-1)">上一页</button>
+              <button class="btn-outline btn-sm" id="auditNext" onclick="loadAudit(auditPage+1)">下一页</button>
+            </span>
           </div>
         </div>
       </div>
@@ -872,9 +1295,10 @@ var cfgBgType="{{ .BgType }}", cfgBgUrl="{{ .BgCustomURL }}", cfgBgBlur={{ .BgBl
     cfgOpacity={{ .CardOpacity }}, cfgPadding={{ .CardPadding }};
 var currentToken="{{ .Token }}", customUrl="{{ .CustomServerURL }}", browserUrl="{{ .BrowserURL }}";
 var isAdmin={{ .IsAdmin }}, curVersion="{{ .Version }}";
-var tgToken="{{ .TGToken }}", tgChat="{{ .TGChatID }}", whUrl="{{ .WebhookURL }}";
+var tgToken="{{ .TGToken }}", tgChat="{{ .TGChatID }}", whUrl="{{ .WebhookURL }}", whFormat="{{ .WebhookFormat }}";
 var updateRepo="{{ .UpdateRepo }}", updateProxy="{{ .UpdateProxy }}", restartCmd="{{ .RestartCmd }}";
 var agentBundle="{{ .AgentBundleVersion }}";
+var adminName="{{ .AdminName }}";
 /* 安装命令模板，与后端 installCmdTmpl 同源；架构由目标机器 uname -m 自行探测 */
 var installTmpl={{ .InstallTmpl }};
 function buildInstallCmd(id, serverAddr, token){
@@ -1164,6 +1588,8 @@ function applyViewIcon(){
 }
 
 /* ================= 设置 ================= */
+/* 切页时按需拉取该面板的数据：一次全拉会让打开「系统管理」明显变慢，
+   而多数人进来只改一项设置 */
 function switchTab(t){
   var cs=document.querySelectorAll('.tab-content');
   for(var i=0;i<cs.length;i++) cs[i].classList.remove('active');
@@ -1173,8 +1599,16 @@ function switchTab(t){
   if(panel) panel.classList.add('active');
   var btn=document.querySelector('.sidebar-btn[data-tab="'+t+'"]');
   if(btn) btn.classList.add('active');
-  if(t==='update' && isAdmin && !latestVersion) checkUpdate(true);
-  if(t==='install' && isAdmin) refreshInstallInfo();
+
+  if(!isAdmin) return;
+  if(t==='overview') loadSystemInfo();
+  if(t==='nodes'){ renderGroupFilter(); }
+  if(t==='alert'){ loadAlertRules(); loadAlertHistory(); }
+  if(t==='data') loadDataStats();
+  if(t==='account') loadSecurity();
+  if(t==='audit') loadAudit(1);
+  if(t==='update' && !latestVersion) checkUpdate(true);
+  if(t==='install') refreshInstallInfo();
 }
 /* 提示面板当前缓存了哪些架构的客户端二进制：
    arm64 没缓存时，arm64 机器执行安装命令会拿到 404，提前告知避免踩坑 */
@@ -1191,15 +1625,18 @@ function refreshInstallInfo(){
 function openSettings(){
   document.getElementById('settingsModal').classList.add('open');
   loadNodeList(); loadGlobalTargets(); loadAgentUpdateList();
+  switchTab('overview');
 }
 function closeSettings(){document.getElementById('settingsModal').classList.remove('open');}
 function closeDetailModal(){document.getElementById('detailModal').classList.remove('open');}
 function initConfigDisplay(){
   if(!isAdmin) return;
-  var set=function(id,v){var e=document.getElementById(id); if(e&&v!==undefined) e.value=v;};
+  var set=function(id,v){var e=document.getElementById(id); if(e&&v!==undefined&&v!==null) e.value=v;};
   set('tokenInput',currentToken); set('serverUrlInput',customUrl);
   set('tgToken',tgToken); set('tgChat',tgChat); set('webhookUrl',whUrl);
+  set('webhookFormat',whFormat);
   set('updateRepo',updateRepo); set('updateProxy',updateProxy); set('restartCmd',restartCmd);
+  set('accountName',adminName);
   document.getElementById('agentBundleVer').innerText=agentBundle?('v'+agentBundle):'未同步';
 }
 function copyText(txt){
@@ -1243,13 +1680,99 @@ function executeSaveToken(){
 /* 安装命令不再内联进 onclick：命令里同时含单引号和双引号，
    内联进 HTML 属性必然要来回转义，很容易出错。改为按 id 存表。 */
 var installCmds={};
+/* picked 是勾选状态，独立于渲染存在：
+   列表每 2 秒会被 updateStats 触发重建，勾选状态必须活过重建 */
+var picked={};
+var groupFilter='';
 function copyInstallCmd(id){ copyText(installCmds[id]||''); }
+
+function renderGroupFilter(){
+  var el=document.getElementById('groupFilter');
+  if(!el) return;
+  var set={};
+  Object.keys(statsData).forEach(function(id){ var g=statsData[id].group||''; if(g) set[g]=1; });
+  var groups=Object.keys(set).sort();
+  if(!groups.length){ el.innerHTML=''; return; }
+  var html='<span class="filter-chip'+(!groupFilter?' on':'')+'" data-g="">全部</span>';
+  groups.forEach(function(g){
+    html+='<span class="filter-chip'+(groupFilter===g?' on':'')+'" data-g="'+escapeHtml(g)+'">'+escapeHtml(g)+'</span>';
+  });
+  el.innerHTML=html;
+}
+function visibleNodeIds(){
+  return Object.keys(statsData).filter(function(id){
+    return !groupFilter || (statsData[id].group||'')===groupFilter;
+  });
+}
+function togglePick(cb){
+  var id=cb.getAttribute('data-id');
+  if(cb.checked) picked[id]=1; else delete picked[id];
+  updatePickCount();
+}
+function togglePickAll(on){
+  visibleNodeIds().forEach(function(id){ if(on) picked[id]=1; else delete picked[id]; });
+  loadNodeList();
+}
+function updatePickCount(){
+  var n=Object.keys(picked).length;
+  var el=document.getElementById('pickCount');
+  if(el) el.innerText='已选 '+n+' 个';
+  var pa=document.getElementById('pickAll');
+  if(!pa) return;
+  var all=visibleNodeIds();
+  var sel=all.filter(function(id){ return picked[id]; }).length;
+  pa.checked=all.length>0&&sel===all.length;
+  pa.indeterminate=sel>0&&sel<all.length;
+}
+function toggleMeta(id,key,val){
+  fetch('/api/settings/node_meta',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'id='+encodeURIComponent(id)+'&'+key+'='+(val?'1':'0')})
+  .then(function(){
+    if(statsData[id]) statsData[id][key]=val;
+    loadNodeList();
+    toast(val?'已开启':'已关闭','ok');
+  });
+}
+function runBulk(){
+  var action=document.getElementById('bulkAction').value;
+  if(!action){ toast('请先选择要执行的操作','warn'); return; }
+  var ids=Object.keys(picked);
+  if(!ids.length){ toast('请先勾选节点','warn'); return; }
+
+  var value='';
+  if(action==='group'){
+    value=document.getElementById('bulkGroupValue').value.trim();
+    if(!value){ toast('请填写分组名称','warn'); return; }
+  }
+  if(action==='delete' && !confirm('确认删除选中的 '+ids.length+' 个节点？\n\n仍在线者会收到停止指令并执行自毁。')) return;
+  if(action==='update' && !confirm('向选中的 '+ids.length+' 个节点下发客户端更新？\n\n节点会自动替换程序并重启，监控将短暂中断。')) return;
+
+  fetch('/api/settings/nodes/batch',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:action,ids:ids,value:value})})
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if(d.error){ toast(d.error,'err'); return; }
+    toast('已执行，影响 '+d.count+' 个节点','ok');
+    if(action==='delete'||action==='update') picked={};
+    loadNodeList(); renderGroupFilter(); updateStats();
+  })
+  .catch(function(){ toast('执行失败','err'); });
+}
+
 function loadNodeList(){
   if(!isAdmin) return;
-  var ids=Object.keys(statsData).sort(function(a,b){return (statsData[b].install_time||0)-(statsData[a].install_time||0);});
+  var all=Object.keys(statsData).sort(function(a,b){return (statsData[b].install_time||0)-(statsData[a].install_time||0);});
+  var ids=visibleNodeIds().sort(function(a,b){return (statsData[b].install_time||0)-(statsData[a].install_time||0);});
   var el=document.getElementById('nodeList');
   installCmds={};
-  if(!ids.length){el.innerHTML='<div style="text-align:center;padding:26px;color:var(--text-sub)">暂无接入节点</div>';return;}
+  if(!all.length){
+    el.innerHTML='<div style="text-align:center;padding:26px;color:var(--text-sub)">暂无接入节点</div>';
+    updatePickCount(); return;
+  }
+  if(!ids.length){
+    el.innerHTML='<div style="text-align:center;padding:26px;color:var(--text-sub)">该分组下没有节点</div>';
+    updatePickCount(); return;
+  }
   var html='';
   ids.forEach(function(id){
     var s=statsData[id];
@@ -1257,24 +1780,41 @@ function loadNodeList(){
     // 命令内自带 uname -m 探测，目标机器自行拉取 amd64 / arm64 二进制
     installCmds[id]=buildInstallCmd(id, serverAddr, currentToken);
     var ver=s.version?(s.version==='dev'?'dev':'v'+s.version):'—';
+
+    var chips='';
+    if(s.group) chips+='<span class="g-chip">'+escapeHtml(s.group)+'</span>';
+    if(s.maintenance) chips+='<span class="g-chip maint">维护中</span>';
+    if(s.alert_muted) chips+='<span class="g-chip mute">已静音</span>';
+
     html+='<div class="node-row">'+
-      '<div style="flex:1;min-width:150px"><div style="font-weight:600;font-size:14px">'+escapeHtml(s.name||s.agent_id)+'</div>'+
-      '<div style="font-size:11.5px;color:var(--text-mute);font-family:Menlo,monospace;margin-top:3px">'+escapeHtml(id)+' · '+escapeHtml(ver)+' · '+escapeHtml(s.arch||'?')+'</div></div>'+
+      '<input type="checkbox" class="pick" data-id="'+escapeHtml(id)+'"'+(picked[id]?' checked':'')+' onchange="togglePick(this)">'+
+      '<div style="flex:1;min-width:150px">'+
+        '<div style="font-weight:600;font-size:14px;display:flex;align-items:center;gap:7px;flex-wrap:wrap">'+
+          escapeHtml(s.name||s.agent_id)+chips+'</div>'+
+        '<div style="font-size:11.5px;color:var(--text-mute);font-family:Menlo,monospace;margin-top:3px">'+
+          escapeHtml(id)+' · '+escapeHtml(ver)+' · '+escapeHtml(s.arch||'?')+'</div>'+
+      '</div>'+
       '<div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">'+
-        '<button class="btn-outline btn-sm" style="opacity:'+(s.hide_id?.45:1)+'" onclick="toggleHide(\''+id+'\')" title="显示/隐藏ID">👁️</button>'+
+        '<button class="btn-outline btn-sm" style="opacity:'+(s.hide_id?.45:1)+'" onclick="toggleHide(\''+id+'\')" title="显示/隐藏 ID">👁️</button>'+
+        '<button class="btn-outline btn-sm'+(s.maintenance?' on-warn':'')+'" onclick="toggleMeta(\''+id+'\',\'maintenance\','+(s.maintenance?'false':'true')+')" title="维护模式：期间不触发任何告警">🔧</button>'+
+        '<button class="btn-outline btn-sm" style="opacity:'+(s.alert_muted?.5:1)+'" onclick="toggleMeta(\''+id+'\',\'alert_muted\','+(s.alert_muted?'false':'true')+')" title="静音告警">🔔</button>'+
         '<input type="number" class="input-text" style="width:62px;padding:7px;text-align:center" value="'+(s.sort_order||0)+'" placeholder="排序" id="s-'+id+'">'+
-        '<input type="text" class="input-text" style="width:130px;padding:7px" value="'+escapeHtml(s.name||'')+'" placeholder="设置别名" id="n-'+id+'">'+
+        '<input type="text" class="input-text" style="width:120px;padding:7px" value="'+escapeHtml(s.name||'')+'" placeholder="设置别名" id="n-'+id+'">'+
+        '<input type="text" class="input-text" style="width:96px;padding:7px" value="'+escapeHtml(s.group||'')+'" placeholder="分组" id="g-'+id+'">'+
         '<button class="btn-primary btn-sm" onclick="saveNode(\''+id+'\')">保存</button>'+
         '<button class="btn-outline btn-sm" onclick="copyInstallCmd(\''+id+'\')" title="复制安装命令（自动识别 amd64 / arm64）">📋</button>'+
         '<button class="btn-del" onclick="deleteNode(\''+id+'\')" title="删除节点">🗑️</button>'+
       '</div></div>';
   });
   el.innerHTML=html;
+  updatePickCount();
 }
 function saveNode(id){
-  var n=document.getElementById('n-'+id).value, so=document.getElementById('s-'+id).value;
-  fetch('/api/settings/update_node',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+id+'&name='+encodeURIComponent(n)+'&sort='+so})
-  .then(function(){loadNodeList();updateStats();toast('节点信息已更新','ok');});
+  var n=document.getElementById('n-'+id).value, so=document.getElementById('s-'+id).value,
+      g=document.getElementById('g-'+id).value;
+  fetch('/api/settings/update_node',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'id='+encodeURIComponent(id)+'&name='+encodeURIComponent(n)+'&sort='+encodeURIComponent(so)+'&group='+encodeURIComponent(g)})
+  .then(function(){loadNodeList();renderGroupFilter();updateStats();toast('节点信息已更新','ok');});
 }
 function toggleHide(id){
   fetch('/api/settings/toggle_hide',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+id}).then(function(){loadNodeList();updateStats();});
@@ -1291,11 +1831,20 @@ function executeDelete(){
   .then(function(){loadNodeList();updateStats();closeConfirm();toast('🗑️ 节点已删除','ok');});
 }
 function saveAlert(){
-  var t=document.getElementById('tgToken').value,c=document.getElementById('tgChat').value,w=document.getElementById('webhookUrl').value;
-  fetch('/api/settings/alert',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'token='+encodeURIComponent(t)+'&chat='+encodeURIComponent(c)+'&webhook='+encodeURIComponent(w)})
-  .then(function(){tgToken=t;tgChat=c;whUrl=w;toast('告警配置已保存','ok');});
+  var t=document.getElementById('tgToken').value,c=document.getElementById('tgChat').value,
+      w=document.getElementById('webhookUrl').value,f=document.getElementById('webhookFormat').value;
+  fetch('/api/settings/alert',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'token='+encodeURIComponent(t)+'&chat='+encodeURIComponent(c)+'&webhook='+encodeURIComponent(w)+'&format='+encodeURIComponent(f)})
+  .then(function(){tgToken=t;tgChat=c;whUrl=w;whFormat=f;toast('通知通道已保存','ok');});
 }
-function testAlert(){fetch('/api/settings/test_alert',{method:'POST'}).then(function(){toast('测试消息已发送','ok');});}
+function testAlert(){
+  fetch('/api/settings/test_alert',{method:'POST'}).then(function(r){
+    // 服务端在「一个通道都没配」时返回 400 并带上原因，必须显示出来，
+    // 否则使用者会以为测试成功，实际什么都没发出去
+    if(!r.ok) return r.text().then(function(t){throw new Error(t||'发送失败');});
+    toast('测试消息已发送','ok');
+  }).catch(function(e){ toast('❌ '+(e.message||'发送失败'),'err'); });
+}
 function loadGlobalTargets(){
   if(!isAdmin) return;
   fetch('/api/settings/get_global_targets').then(function(r){return r.json()}).then(function(d){currentTargets=d||[];renderTargets();});
@@ -1456,6 +2005,321 @@ function saveUpdateSource(){
   .catch(function(e){toast('❌ '+(e.message||'保存失败'),'err');});
 }
 
+/* ================= 运行概览 ================= */
+function fmtDuration(sec){
+  sec=sec||0;
+  var d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);
+  if(d>0) return d+' 天 '+h+' 小时';
+  if(h>0) return h+' 小时 '+m+' 分';
+  if(m>0) return m+' 分 '+(sec%60)+' 秒';
+  return sec+' 秒';
+}
+function loadSystemInfo(){
+  if(!isAdmin) return;
+  fetch('/api/settings/system/info').then(function(r){return r.json()}).then(function(d){
+    var cards=[
+      ['🖥️','节点总数',String(d.node_total||0),'','var(--primary)',(d.node_online||0)+' 在线 · '+(d.node_total-(d.node_online||0))+' 离线'],
+      ['⬆️','待更新',String(d.node_pending||0),'','var(--warning)',(d.node_pending?'已下发更新指令':'全部已是最新')],
+      ['⏱','面板运行',fmtDuration(d.uptime_sec),'','var(--info)','启动于 '+escapeHtml((d.started_at||'').replace('T',' ').slice(0,19))],
+      ['🧠','内存占用',fmtBytes(d.mem_alloc),'','var(--violet)','GC '+d.num_gc+' 次 · '+d.goroutines+' 协程'],
+      ['🗄️','数据库',fmtBytes(d.db_size),'','var(--success)',(d.history_rows||0).toLocaleString()+' 条历史记录'],
+      ['🚨','告警记录',String(d.alert_rows||0),'','var(--danger)','保留 '+(d.alert_keep_days||30)+' 天'],
+    ];
+    var box=document.getElementById('sysStats');
+    box.innerHTML=cards.map(function(c){
+      return '<div class="stat"><div class="stat-k">'+c[0]+' '+c[1]+'</div>'+
+        '<div class="stat-v" style="color:'+c[4]+'">'+c[2]+(c[3]?'<small>'+c[3]+'</small>':'')+'</div>'+
+        '<div class="stat-s">'+c[5]+'</div></div>';
+    }).join('');
+
+    var kv=[
+      ['版本', escapeHtml(d.version||'dev')],
+      ['提交', escapeHtml(d.commit||'unknown')],
+      ['构建时间', escapeHtml(d.build_time||'unknown')],
+      ['Go 版本', escapeHtml(d.go_version||'')],
+      ['运行平台', escapeHtml(d.platform||'')],
+      ['数据库路径', escapeHtml(d.db_path||'')],
+      ['监控历史', (d.history_rows||0).toLocaleString()+' 条（保留 '+(d.history_keep||24)+' 小时）'],
+      ['操作日志', (d.audit_rows||0).toLocaleString()+' 条（保留 '+(d.audit_keep_days||90)+' 天）'],
+      ['管理员账号', String(d.admin_count||0)],
+      ['已删除节点', String(d.node_denied||0)],
+      ['在线判定窗口', (d.online_window||30)+' 秒'],
+      ['登录失败记录', (d.login_guard||0)+' 个来源'],
+    ];
+    document.getElementById('sysKv').innerHTML=kv.map(function(r){
+      return '<div class="kv-k">'+r[0]+'</div><div class="kv-v">'+r[1]+'</div>';
+    }).join('');
+  }).catch(function(){});
+
+  fetch('/api/settings/alert/history?limit=8').then(function(r){return r.json()}).then(function(d){
+    var el=document.getElementById('ovAlertBody');
+    if(!d.items||!d.items.length){
+      el.innerHTML='<tr><td colspan="4" class="tbl-empty">暂无告警记录</td></tr>';
+      return;
+    }
+    el.innerHTML=d.items.map(function(a){
+      return '<tr><td class="mono">'+escapeHtml((a.created_at||'').replace('T',' ').slice(0,19))+'</td>'+
+        '<td>'+escapeHtml(a.node_name||a.agent_id)+'</td>'+
+        '<td>'+levelBadge(a.level)+'</td>'+
+        '<td>'+escapeHtml((a.message||'').split('\n').join(' · '))+'</td></tr>';
+    }).join('');
+  }).catch(function(){});
+}
+function levelBadge(lv){
+  var map={critical:'严重',warning:'警告',info:'恢复'};
+  var l=(lv==='critical'||lv==='warning')?lv:'info';
+  return '<span class="lv '+l+'"><i></i>'+escapeHtml(map[lv]||lv||'-')+'</span>';
+}
+
+/* ================= 告警规则 / 历史 ================= */
+function loadAlertRules(){
+  if(!isAdmin) return;
+  fetch('/api/settings/alert/rules').then(function(r){return r.json()}).then(function(d){
+    document.getElementById('ruleEnabled').checked=!!d.enabled;
+    document.getElementById('ruleOffline').checked=!!d.offline;
+    document.getElementById('ruleOfflineSec').value=d.offline_sec||30;
+    document.getElementById('ruleCooldown').value=d.cooldown_min||0;
+    document.getElementById('ruleCpu').value=d.cpu||0;
+    document.getElementById('ruleMem').value=d.mem||0;
+    document.getElementById('ruleDisk').value=d.disk||0;
+    document.getElementById('ruleKeepDays').value=d.keep_days||30;
+  }).catch(function(){});
+}
+function saveAlertRules(){
+  var body='enabled='+(document.getElementById('ruleEnabled').checked?'1':'0')+
+    '&offline='+(document.getElementById('ruleOffline').checked?'1':'0')+
+    '&offline_sec='+encodeURIComponent(document.getElementById('ruleOfflineSec').value||'30')+
+    '&cooldown_min='+encodeURIComponent(document.getElementById('ruleCooldown').value||'0')+
+    '&cpu='+encodeURIComponent(document.getElementById('ruleCpu').value||'0')+
+    '&mem='+encodeURIComponent(document.getElementById('ruleMem').value||'0')+
+    '&disk='+encodeURIComponent(document.getElementById('ruleDisk').value||'0')+
+    '&keep_days='+encodeURIComponent(document.getElementById('ruleKeepDays').value||'30');
+  fetch('/api/settings/alert/rules',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+  .then(function(r){
+    if(!r.ok) return r.text().then(function(t){throw new Error(t||'保存失败');});
+    toast('告警规则已保存','ok');
+  }).catch(function(e){ toast('❌ '+(e.message||'保存失败'),'err'); });
+}
+function loadAlertHistory(){
+  if(!isAdmin) return;
+  var kind=document.getElementById('alertHistoryKind').value;
+  fetch('/api/settings/alert/history?limit=100&kind='+encodeURIComponent(kind))
+  .then(function(r){return r.json()}).then(function(d){
+    var body=document.getElementById('alertHistoryBody');
+    if(!d.items||!d.items.length){
+      body.innerHTML='<tr><td colspan="5" class="tbl-empty">暂无告警记录</td></tr>';
+    } else {
+      body.innerHTML=d.items.map(function(a){
+        return '<tr><td class="mono">'+escapeHtml((a.created_at||'').replace('T',' ').slice(0,19))+'</td>'+
+          '<td>'+escapeHtml(a.node_name||a.agent_id)+'</td>'+
+          '<td>'+escapeHtml(kindLabel(a.kind))+'</td>'+
+          '<td>'+levelBadge(a.level)+'</td>'+
+          '<td>'+escapeHtml((a.message||'').split('\n').join(' · '))+'</td></tr>';
+      }).join('');
+    }
+    var sum=document.getElementById('alertKindSummary');
+    if(d.by_kind&&d.by_kind.length){
+      sum.innerHTML=d.by_kind.map(function(k){
+        return '<span class="filter-chip">'+escapeHtml(kindLabel(k.kind))+' · '+k.count+'</span>';
+      }).join('');
+    } else sum.innerHTML='';
+  }).catch(function(){});
+}
+function kindLabel(k){
+  var m={offline:'离线',online:'恢复',cpu:'CPU',mem:'内存',disk:'磁盘'};
+  return m[k]||k||'-';
+}
+function clearAlertHistory(){
+  if(!confirm('清理 30 天前的告警历史？')) return;
+  fetch('/api/settings/alert/history/clear',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'days=30'})
+  .then(function(r){return r.json()}).then(function(d){ toast('已清理 '+d.deleted+' 条','ok'); loadAlertHistory(); });
+}
+
+/* ================= 数据管理 ================= */
+function loadDataStats(){
+  if(!isAdmin) return;
+  fetch('/api/settings/data/stats').then(function(r){return r.json()}).then(function(d){
+    var cards=[
+      ['🗄️','数据库体积',fmtBytes(d.db_size),'','var(--primary)',escapeHtml(d.db_path||'')],
+      ['📈','监控历史',(d.history_rows||0).toLocaleString(),'','var(--info)',(d.oldest?('最早 '+escapeHtml(d.oldest)):'暂无数据')],
+      ['📜','操作日志',(d.audit_rows||0).toLocaleString(),'','var(--violet)','保留 '+(d.audit_keep_days||90)+' 天'],
+      ['🚨','告警历史',(d.alert_rows||0).toLocaleString(),'','var(--danger)','保留 '+(d.alert_keep_days||30)+' 天'],
+    ];
+    document.getElementById('dataStats').innerHTML=cards.map(function(c){
+      return '<div class="stat"><div class="stat-k">'+c[0]+' '+c[1]+'</div>'+
+        '<div class="stat-v" style="color:'+c[4]+'">'+c[2]+'</div>'+
+        '<div class="stat-s">'+c[5]+'</div></div>';
+    }).join('');
+    document.getElementById('keepHours').value=d.history_keep||24;
+    document.getElementById('keepAuditDays').value=d.audit_keep_days||90;
+    document.getElementById('keepAlertDays').value=d.alert_keep_days||30;
+  }).catch(function(){});
+}
+function saveRetention(){
+  var body='history_hours='+encodeURIComponent(document.getElementById('keepHours').value)+
+    '&audit_days='+encodeURIComponent(document.getElementById('keepAuditDays').value)+
+    '&alert_days='+encodeURIComponent(document.getElementById('keepAlertDays').value);
+  fetch('/api/settings/data/retention',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+  .then(function(r){
+    if(!r.ok) return r.text().then(function(t){throw new Error(t||'保存失败');});
+    toast('保留策略已保存','ok'); loadDataStats();
+  }).catch(function(e){ toast('❌ '+(e.message||'保存失败'),'err'); });
+}
+function runCleanup(mode){
+  var label={expired:'按保留策略清理监控历史',all:'清空全部监控历史',alerts:'清空告警历史'}[mode]||mode;
+  if(!confirm('确认执行「'+label+'」？此操作不可撤销。')) return;
+  fetch('/api/settings/data/cleanup',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+encodeURIComponent(mode)})
+  .then(function(r){return r.json()}).then(function(d){ toast('已删除 '+d.deleted+' 条记录','ok'); loadDataStats(); });
+}
+function exportData(type,format){
+  window.location.href='/api/settings/data/export?type='+encodeURIComponent(type)+'&format='+encodeURIComponent(format);
+  toast('导出已开始','ok');
+}
+function downloadBackup(){
+  var el=document.getElementById('backupMsg');
+  el.style.display='block'; el.className='update-msg'; el.innerText='正在生成备份（VACUUM INTO）并校验…';
+  // 用 iframe 而不是 window.location：备份是文件下载，直接跳转会打断当前页面状态
+  var f=document.createElement('iframe');
+  f.style.display='none';
+  f.src='/api/settings/data/backup';
+  document.body.appendChild(f);
+  setTimeout(function(){ document.body.removeChild(f); },120000);
+  setTimeout(function(){
+    el.className='update-msg ok';
+    el.innerText='备份文件已开始下载。若浏览器未弹出下载，请检查是否被拦截。';
+  },1500);
+}
+
+/* ================= 账号安全 ================= */
+function renderStrength(v){
+  var bar=document.getElementById('pwdBar'), tip=document.getElementById('pwdTip');
+  var score=0;
+  if(v.length>=8) score++;
+  if(v.length>=12) score++;
+  if(/[a-z]/.test(v)&&/[A-Z]/.test(v)) score++;
+  if(/[0-9]/.test(v)) score++;
+  if(/[^A-Za-z0-9]/.test(v)) score++;
+  var colors=['var(--danger)','var(--warning)','var(--info)','var(--success)','var(--success)'];
+  var labels=['太短','偏弱','一般','较强','很强'];
+  var pct=Math.min(100,score*20);
+  bar.style.width=pct+'%';
+  bar.style.background=colors[Math.max(0,score-1)];
+  if(!v){ bar.style.width='0'; tip.innerText='至少 8 位，需包含大写字母、小写字母、数字、符号中的至少两类'; return; }
+  tip.innerText='强度：'+labels[Math.max(0,score-1)];
+}
+function changePassword(){
+  var o=document.getElementById('pwdOld').value,n=document.getElementById('pwdNew').value,c=document.getElementById('pwdConfirm').value;
+  if(!o||!n){ toast('请填写完整','warn'); return; }
+  if(n!==c){ toast('两次输入的新密码不一致','warn'); return; }
+  fetch('/api/settings/account/password',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'old='+encodeURIComponent(o)+'&new='+encodeURIComponent(n)+'&confirm='+encodeURIComponent(c)})
+  .then(function(r){
+    if(!r.ok) return r.text().then(function(t){throw new Error(t||'修改失败');});
+    // 服务端已让全部会话失效，这里直接回登录页
+    toast('密码已更新，请重新登录','ok');
+    setTimeout(function(){ location.href='/login'; },1200);
+  }).catch(function(e){ toast('❌ '+(e.message||'修改失败'),'err'); });
+}
+function changeUsername(){
+  var u=document.getElementById('accountName').value.trim(),p=document.getElementById('accountPwd').value;
+  if(!u||!p){ toast('请填写用户名与当前密码','warn'); return; }
+  fetch('/api/settings/account/username',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'username='+encodeURIComponent(u)+'&password='+encodeURIComponent(p)})
+  .then(function(r){
+    if(!r.ok) return r.text().then(function(t){throw new Error(t||'修改失败');});
+    adminName=u; toast('用户名已更新','ok');
+  }).catch(function(e){ toast('❌ '+(e.message||'修改失败'),'err'); });
+}
+function loadSecurity(){
+  if(!isAdmin) return;
+  fetch('/api/settings/account/security').then(function(r){return r.json()}).then(function(d){
+    document.getElementById('securityHint').innerHTML=
+      '登录保护策略：同一来源连续失败 <b>'+d.max_fails+' 次</b>后锁定 <b>'+d.lock_minutes+' 分钟</b>，'+
+      '失败计数在 <b>'+d.window_minutes+' 分钟</b>内有效。<br>'+
+      '限流按<b>真实 TCP 来源地址</b>计数，不采信 <code>X-Forwarded-For</code> —— 否则请求方随手改个头就能绕过。'+
+      '另外这里刻意<b>不按用户名锁定</b>：那样攻击者只要狂刷管理员用户名，就能把真正的管理员挡在门外。<br>'+
+      '密码哈希算法：bcrypt（cost '+d.bcrypt_cost+'）。当前会话版本：<code>'+escapeHtml(d.session_epoch||'')+'</code>';
+    var body=document.getElementById('securityBody');
+    if(!d.entries||!d.entries.length){
+      body.innerHTML='<tr><td colspan="5" class="tbl-empty">当前没有任何失败记录</td></tr>';
+      return;
+    }
+    body.innerHTML=d.entries.map(function(e){
+      var st=e.locked
+        ? '<span class="lv critical"><i></i>已锁定 '+e.left_sec+'s</span>'
+        : '<span class="lv warning"><i></i>计数中</span>';
+      return '<tr><td class="mono">'+escapeHtml(e.ip)+'</td><td>'+e.fails+'</td><td>'+st+'</td>'+
+        '<td class="mono">'+escapeHtml(e.first_at||'')+'</td>'+
+        '<td><button class="btn-outline btn-sm" data-unlock="'+escapeHtml(e.ip)+'">解除</button></td></tr>';
+    }).join('');
+  }).catch(function(){});
+}
+function unlockAll(){
+  if(!confirm('清空全部登录失败计数与锁定？')) return;
+  fetch('/api/settings/account/unlock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'ip='})
+  .then(function(){ toast('已解除全部锁定','ok'); loadSecurity(); });
+}
+
+/* ================= 操作日志 ================= */
+var auditPage=1;
+function loadAudit(page){
+  if(!isAdmin) return;
+  if(page<1) page=1;
+  auditPage=page;
+  var q=document.getElementById('auditQuery').value.trim();
+  var action=document.getElementById('auditAction').value;
+  fetch('/api/settings/audit?page='+page+'&size=30&q='+encodeURIComponent(q)+'&action='+encodeURIComponent(action))
+  .then(function(r){return r.json()}).then(function(d){
+    var body=document.getElementById('auditBody');
+    if(!d.items||!d.items.length){
+      body.innerHTML='<tr><td colspan="5" class="tbl-empty">没有匹配的操作记录</td></tr>';
+    } else {
+      body.innerHTML=d.items.map(function(a){
+        var okTag=a.success?'':' <span class="lv critical"><i></i>失败</span>';
+        return '<tr><td class="mono">'+escapeHtml((a.created_at||'').replace('T',' ').slice(0,19))+'</td>'+
+          '<td>'+escapeHtml(a.username||'—')+'</td>'+
+          '<td class="mono">'+escapeHtml(a.ip||'—')+'</td>'+
+          '<td><span class="badge mute">'+escapeHtml(actionLabel(a.action))+'</span></td>'+
+          '<td>'+escapeHtml(a.detail||a.target||'')+okTag+'</td></tr>';
+      }).join('');
+    }
+    var pages=Math.max(1,Math.ceil((d.total||0)/30));
+    document.getElementById('auditInfo').innerText='共 '+(d.total||0)+' 条 · 第 '+auditPage+' / '+pages+' 页';
+    document.getElementById('auditPrev').disabled=auditPage<=1;
+    document.getElementById('auditNext').disabled=auditPage>=pages;
+
+    var sel=document.getElementById('auditAction');
+    var cur=sel.value;
+    var opts='<option value="all">全部动作</option>';
+    (d.actions||[]).forEach(function(a){
+      opts+='<option value="'+escapeHtml(a)+'">'+escapeHtml(actionLabel(a))+'</option>';
+    });
+    sel.innerHTML=opts;
+    sel.value=cur||'all';
+    if(!sel.value) sel.value='all';
+  }).catch(function(){});
+}
+var actionNames={
+  login:'登录',login_blocked:'登录被限流',logout:'退出登录',setup:'初始化',
+  password_change:'修改密码',username_change:'修改用户名',
+  unlock:'解除锁定',unlock_all:'解除全部锁定',
+  node_create:'新建节点',node_update:'更新节点',node_delete:'删除节点',
+  node_batch:'批量操作节点',node_meta:'节点标记',
+  token_change:'修改 Token',server_url:'修改面板地址',
+  targets_save:'保存监控目标',alert_config:'告警通道',alert_rules:'告警规则',
+  alert_test:'测试告警',alert_history_clear:'清理告警历史',alert_ack:'确认告警',
+  update_server:'面板自更新',agent_sync:'同步客户端',agent_push:'下发客户端更新',agent_push_batch:'批量下发更新',
+  update_source:'修改更新源',
+  data_cleanup:'清理数据',data_export:'导出数据',db_backup:'数据库备份',retention_save:'保存保留策略',
+  audit_clear:'清理操作日志'
+};
+function actionLabel(a){ return actionNames[a]||a||'-'; }
+function clearAudit(){
+  if(!confirm('清理 90 天前的操作日志？')) return;
+  fetch('/api/settings/audit/clear',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'days=90'})
+  .then(function(r){return r.json()}).then(function(d){ toast('已清理 '+d.deleted+' 条','ok'); loadAudit(1); });
+}
+
 /* ================= 详情 / 图表 ================= */
 /* 安全提示：os / ip / arch / version 全部来自 Agent 上报，是不可信输入。
    下面几处会把它们拼进 innerHTML，必须逐个 escapeHtml ——
@@ -1587,6 +2451,30 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeSettin
     card.style.setProperty('--my',(e.clientY-r.top)+'px');
   });
 })();
+/* 系统管理里几处动态内容用事件委托：列表会被整体重建，
+   逐个绑定监听会在每次刷新时泄漏一批 */
+(function(){
+  var gf=document.getElementById('groupFilter');
+  if(gf) gf.addEventListener('click',function(e){
+    var chip=e.target.closest?e.target.closest('.filter-chip'):null;
+    if(!chip) return;
+    groupFilter=chip.getAttribute('data-g')||'';
+    renderGroupFilter(); loadNodeList();
+  });
+  var ba=document.getElementById('bulkAction');
+  if(ba) ba.addEventListener('change',function(){
+    document.getElementById('bulkGroupValue').style.display=this.value==='group'?'':'none';
+  });
+  var sb=document.getElementById('securityBody');
+  if(sb) sb.addEventListener('click',function(e){
+    var b=e.target.closest?e.target.closest('[data-unlock]'):null;
+    if(!b) return;
+    var ip=b.getAttribute('data-unlock');
+    fetch('/api/settings/account/unlock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'ip='+encodeURIComponent(ip)})
+    .then(function(){ toast('已解除 '+ip+' 的锁定','ok'); loadSecurity(); });
+  });
+})();
 initConfigDisplay();
 initBackground();
 updateStats();
@@ -1679,6 +2567,14 @@ body{
 }
 .input-field:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(99,102,241,.22);background:transparent}
 .input-field::placeholder{color:var(--mute)}
+/* 登录失败提示：原来失败后只是静默跳回登录页，
+   使用者无法区分「密码错了」和「服务挂了」 */
+.form-error{
+  display:flex;align-items:flex-start;gap:8px;
+  background:rgba(239,68,68,.10);border:1px solid rgba(239,68,68,.28);color:#dc2626;
+  padding:11px 14px;border-radius:12px;font-size:13px;line-height:1.55;margin-bottom:16px;
+}
+[data-theme="dark"] .form-error{color:#fca5a5}
 .btn-submit{
   width:100%;padding:14px;background:linear-gradient(135deg,var(--primary),var(--primary-2));
   color:#fff;border:none;border-radius:14px;font-size:15.5px;font-weight:700;cursor:pointer;transition:.25s;
@@ -1698,6 +2594,9 @@ body{
     <p>{{ .Subtitle }}</p>
   </div>
   <form method="POST" action="{{ .Action }}">
+    {{ if .Err }}
+    <div class="form-error">⚠️ {{ .Err }}</div>
+    {{ end }}
     <div class="form-group"><input type="text" name="username" class="input-field" placeholder="用户名" required autocomplete="off"></div>
     <div class="form-group"><input type="password" name="password" class="input-field" placeholder="密码" required></div>
     <button type="submit" class="btn-submit">{{ .BtnText }}</button>
