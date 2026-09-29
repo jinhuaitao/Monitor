@@ -107,14 +107,6 @@ body{
 .brand-name{font-weight:800;font-size:18px;letter-spacing:-.4px;line-height:1.15}
 .brand-sub{display:block;font-size:11px;font-weight:600;color:var(--text-mute);letter-spacing:.2px}
 .topbar-tools{display:flex;align-items:center;gap:9px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
-.search-box{
-  display:flex;align-items:center;gap:7px;background:var(--soft);border:1px solid var(--glass-border);
-  border-radius:99px;padding:7px 14px;transition:.25s;min-width:180px;
-}
-.search-box:focus-within{border-color:var(--primary);box-shadow:var(--ring);background:var(--soft-2)}
-.search-box svg{opacity:.5;flex-shrink:0}
-.search-box input{border:none;background:transparent;outline:none;color:var(--text-main);font-size:13px;width:100%;font-family:inherit}
-.search-box input::placeholder{color:var(--text-mute)}
 .mini-select{
   background:var(--soft);border:1px solid var(--glass-border);color:var(--text-main);
   border-radius:99px;padding:8px 12px;font-size:13px;font-family:inherit;cursor:pointer;outline:none;transition:.2s;
@@ -631,7 +623,6 @@ table.tbl td.mono{font-family:'Menlo',monospace;font-size:11.5px;white-space:now
   .topbar-inner{padding:11px 13px;gap:8px;flex-wrap:wrap}
   .brand-name{font-size:16px}
   .topbar-tools{width:100%;margin-left:0;justify-content:flex-start}
-  .search-box{order:3;min-width:0;flex:1}
   .wrap{padding:16px 10px 50px}
   .overview{grid-template-columns:repeat(2,1fr);gap:9px}
   .ov-value{font-size:19px}
@@ -674,10 +665,6 @@ table.tbl td.mono{font-family:'Menlo',monospace;font-size:11.5px;white-space:now
       <span class="brand-text">Hub Monitor<span class="brand-sub">v{{ .Version }}</span></span>
     </div>
     <div class="topbar-tools">
-      <label class="search-box">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><line x1="20" y1="20" x2="16.7" y2="16.7"></line></svg>
-        <input id="nodeSearch" type="search" placeholder="搜索节点名称 / ID…" autocomplete="off">
-      </label>
       <select id="sortSelect" class="mini-select">
         <option value="default">排序：自定义</option>
         <option value="status">排序：状态</option>
@@ -1527,12 +1514,7 @@ function renderNodes(){
   // 改成增量更新后必须显式移除，否则骨架会一直残留在列表末尾。
   var skels=box.getElementsByClassName('skel');
   while(skels.length) skels[0].remove();
-  var q=(document.getElementById('nodeSearch').value||'').toLowerCase().trim();
-  var ids=Object.keys(statsData).filter(function(id){
-    if(!q) return true;
-    var s=statsData[id];
-    return ((s.name||'')+' '+id).toLowerCase().indexOf(q)>=0;
-  });
+  var ids=Object.keys(statsData);
   ids.sort(function(a,b){
     var sa=statsData[a],sb=statsData[b];
     switch(sortMode){
@@ -1553,8 +1535,8 @@ function renderNodes(){
   if(!ids.length){
     Object.keys(cardMap).forEach(function(k){cardMap[k].remove();delete cardMap[k];});
     box.className='node-grid';
-    box.innerHTML='<div class="empty"><div class="empty-ic">'+(q?'🔍':'🛰️')+'</div>'+
-      (q?'没有匹配的节点':'暂无活跃节点<br><span style="font-size:13px;color:var(--text-mute)">点击「系统管理 → 添加节点」获取安装命令</span>')+'</div>';
+    box.innerHTML='<div class="empty"><div class="empty-ic">🛰️</div>'+
+      '暂无活跃节点<br><span style="font-size:13px;color:var(--text-mute)">点击「系统管理 → 添加节点」获取安装命令</span></div>';
     return;
   }
   if(box.firstElementChild&&box.firstElementChild.classList.contains('empty')) box.innerHTML='';
@@ -2487,7 +2469,6 @@ initTheme();
 applyViewIcon();
 document.getElementById('sortSelect').value=sortMode;
 document.getElementById('sortSelect').addEventListener('change',function(){sortMode=this.value;localStorage.setItem('hm_sort',sortMode);renderNodes();});
-document.getElementById('nodeSearch').addEventListener('input',renderNodes);
 document.querySelectorAll('.modal-overlay').forEach(function(o){
   o.addEventListener('click',function(e){if(e.target===o&&o.id!=='confirmModal'&&o.id!=='tokenConfirmModal')o.classList.remove('open');});
 });
