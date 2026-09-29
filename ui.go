@@ -283,6 +283,10 @@ body{
 .m-val{font-size:12px;line-height:1.15;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.3px;transition:color .5s}
 .bar{height:4px;border-radius:99px;background:var(--track);overflow:hidden}
 .bar-fill{height:100%;border-radius:99px;transition:width .7s cubic-bezier(.4,0,.2,1),background .5s,box-shadow .5s;min-width:2px}
+/* 磁贴容量行：绝对用量（如 3.2 GB / 8.0 GB）。元素始终占位、无数据时留空，
+   卡片高度才不会在"老客户端没上报"和"已上报"之间跳一下 */
+.m-cap{font-size:9.5px;line-height:1.35;min-height:13px;margin-top:3px;color:var(--text-mute);
+  font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* 页脚：固定四格（下行 / 上行 / 运行时长 / 延迟），胶囊按内容宽度、两端均匀铺开。
    用 grid 固定轨道而不是 flex-wrap —— 无论数值多长、延迟有没有数据，
@@ -508,6 +512,8 @@ body{
 .kv>div:nth-last-child(-n+2){border-bottom:none}
 .kv-k{color:var(--text-sub);font-weight:600;font-size:12.5px}
 .kv-v{font-family:'Menlo',monospace;font-size:12px;word-break:break-all;color:var(--text-main)}
+/* 键值行里的次要说明（核数、已用百分比、挂载点）：压低对比度让主数值仍然抢眼 */
+.kv-dim{color:var(--text-mute);font-size:11.5px;margin-left:6px}
 
 /* 开关 */
 .switch{display:inline-flex;align-items:center;gap:10px;cursor:pointer;user-select:none;font-size:13px;font-weight:600;color:var(--text-main)}
@@ -1282,6 +1288,31 @@ function fmtUptime(s){
   s=s||0; var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
   if(d>0) return d+'天'+h+'小时'; if(h>0) return h+'小时'+m+'分'; return m+'分';
 }
+/* 容量行：总量 + 已用 + 百分比。
+   总量缺失（老面板 / 采集失败 / 被过滤掉的非法上报值）时返回「—」，
+   绝不能退化成 "0 B" —— 那会让人误以为机器真的一点内存都没有。
+   返回的是 HTML（含 .kv-dim 次要说明），调用方不要再转义。 */
+function capText(total,used){
+  if(!total||total<=0) return '—';
+  var s=fmtBytes(total);
+  if(used&&used>0) s+='<span class="kv-dim">已用 '+fmtBytes(used)+' · '+Math.round(used/total*100)+'%</span>';
+  return s;
+}
+/* 磁贴容量：只留「已用 / 总量」两个数，塞得进三等分的窄磁贴。
+   节点只上报百分比，已用量在这里反推。 */
+function capShort(total,pct){
+  if(!total||total<=0) return '';
+  return fmtBytes(total*(pct||0)/100)+' / '+fmtBytes(total);
+}
+/* CPU 描述：型号 + 核数 + 主频。型号读不到时退化成核数，全都没有才显示「—」 */
+function cpuText(model,cores,mhz){
+  var t=model?escapeHtml(model):'';
+  var dim=[];
+  if(cores) dim.push(cores+' 核');
+  if(mhz) dim.push(Math.round(mhz)+' MHz');
+  if(dim.length) t+='<span class="kv-dim">'+dim.join(' · ')+'</span>';
+  return t||'—';
+}
 function toast(msg,type){
   var t=document.getElementById('toast');
   t.className='toast'+(type?' '+type:'');
@@ -1376,7 +1407,8 @@ function metricSkeleton(label){
   return '<div class="metric"><div class="m-head">'+
     '<span class="m-label"><i class="m-dot"></i>'+label+'</span>'+
     '<span class="m-val"></span></div>'+
-    '<div class="bar"><div class="bar-fill"></div></div></div>';
+    '<div class="bar"><div class="bar-fill"></div></div>'+
+    '<div class="m-cap"></div></div>';
 }
 /* 指标主色：文字与色点用纯色，进度条用同色系渐变，低负载偏冷、高负载转暖 */
 function metricColor(kind,v){
@@ -1397,7 +1429,7 @@ function metricGrad(kind,v){
 }
 /* online=false 时（节点离线）数值与色点转为中性灰：
    死掉的节点不该继续顶着"健康"的绿色/蓝色数字 */
-function setMetric(el,kind,val,online){
+function setMetric(el,kind,val,online,total){
   if(!el) return;
   var v=val||0, dead=(online===false);
   var color=dead?'var(--text-mute)':metricColor(kind,v);
@@ -1409,6 +1441,13 @@ function setMetric(el,kind,val,online){
   fill.style.width=Math.min(100,v)+'%';
   fill.style.background=dead?'linear-gradient(90deg,var(--track),var(--track))':metricGrad(kind,v);
   fill.style.boxShadow=dead?'none':('0 0 10px -2px '+color);
+  // 容量行：绝对用量。老客户端没上报 total 时留空（元素仍在，卡片高度不变）。
+  // 离线节点报的是最后一次的旧值，同样转灰，不用健康色误导。
+  var cap=el.querySelector('.m-cap');
+  if(cap){
+    cap.textContent=capShort(total,v);
+    cap.style.color=dead?'var(--text-mute)':'';
+  }
 }
 
 /* 卡片只创建一次，刷新时原地更新字段。
@@ -1466,8 +1505,8 @@ function updateCard(card,s){
   card.querySelector('.nc-upd').className='nc-upd'+(s.pending_update?' on':'');
   var m=card.querySelectorAll('.metric');
   setMetric(m[0],'cpu',s.cpu_usage,on);
-  setMetric(m[1],'mem',s.mem_used_percent,on);
-  setMetric(m[2],'disk',s.disk_used_percent,on);
+  setMetric(m[1],'mem',s.mem_used_percent,on,s.mem_total);
+  setMetric(m[2],'disk',s.disk_used_percent,on,s.disk_total);
   var foot=card.querySelector('.nc-foot');
   var fh=footHtml(s);
   if(foot.dataset.h!==fh){ foot.innerHTML=fh; foot.dataset.h=fh; }
@@ -2032,7 +2071,16 @@ function loadSystemInfo(){
         '<div class="stat-s">'+c[5]+'</div></div>';
     }).join('');
 
+    // 硬件规格排在最前：这是运维接手一台机器时最先要看的三项
+    var diskText=capText(d.disk_total,d.disk_used);
+    if(d.disk_path&&d.disk_total>0) diskText+='<span class="kv-dim">'+escapeHtml(d.disk_path)+'</span>';
     var kv=[
+      ['CPU 型号', cpuText(d.cpu_model,d.cpu_cores,d.cpu_mhz)],
+      ['内存大小', capText(d.mem_total,d.mem_used)],
+      ['硬盘大小', diskText],
+      ['主机名', escapeHtml(d.hostname||'—')],
+      ['系统版本', escapeHtml(d.os_name||'—')],
+      ['内核版本', escapeHtml(d.kernel||'—')],
       ['版本', escapeHtml(d.version||'dev')],
       ['提交', escapeHtml(d.commit||'unknown')],
       ['构建时间', escapeHtml(d.build_time||'unknown')],
@@ -2332,6 +2380,11 @@ function openNodeDetails(id){
   var items=[
     ['节点名称 / ID', '<span class="nc-flag">'+flag+'</span>'+escapeHtml(s.name||s.agent_id)+'<br><span style="font-size:12px;color:var(--text-mute)">'+escapeHtml(s.agent_id)+'</span>'],
     ['操作系统', escapeHtml(s.os||'—')],
+    ['CPU 型号', s.cpu_model?escapeHtml(s.cpu_model):'—'],
+    // 节点只上报百分比，已用量在这里按总量反推；老客户端没有 mem_total/disk_total，
+    // capText 会退化成「—」，不会显示成 0 B
+    ['内存大小', capText(s.mem_total,s.mem_total*(s.mem_used_percent||0)/100)],
+    ['硬盘大小', capText(s.disk_total,s.disk_total*(s.disk_used_percent||0)/100)],
     ['IP 地址', escapeHtml(s.ip||'—')],
     ['架构 / 版本', escapeHtml(s.arch||'—')+' · '+escapeHtml((s.version&&s.version!=='dev')?'v'+s.version:'dev')],
     ['持续运行', fmtUptime(s.uptime)],

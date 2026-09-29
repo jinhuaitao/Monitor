@@ -152,6 +152,9 @@ type SystemStatus struct {
 	CPUUsage        float64            `json:"cpu_usage"`
 	MemUsedPercent  float64            `json:"mem_used_percent"`
 	DiskUsedPercent float64            `json:"disk_used_percent"`
+	CPUModel        string             `json:"cpu_model"`  // [新增] CPU 型号
+	MemTotal        uint64             `json:"mem_total"`  // [新增] 物理内存总量（字节）
+	DiskTotal       uint64             `json:"disk_total"` // [新增] 根分区总容量（字节）
 	NetInSpeed      uint64             `json:"net_in_speed"`
 	NetOutSpeed     uint64             `json:"net_out_speed"`
 	NetTotalIn      uint64             `json:"net_total_in"`
@@ -1410,6 +1413,18 @@ func sanitizeReport(s *SystemStatus) {
 	s.IP = cleanField(s.IP, 64)
 	s.Version = cleanField(s.Version, 32)
 	s.Arch = cleanField(s.Arch, 16)
+	s.CPUModel = cleanField(s.CPUModel, 96)
+
+	// 容量字段同样不可信：一个被篡改的 Agent 可以上报 2^64-1，
+	// 前端会把它渲染成天文数字。超过 1 PiB 的一律视为无效置零，
+	// 前端据此显示「—」而不是一个假数字。
+	const maxSaneBytes = uint64(1) << 50 // 1 PiB
+	if s.MemTotal > maxSaneBytes {
+		s.MemTotal = 0
+	}
+	if s.DiskTotal > maxSaneBytes {
+		s.DiskTotal = 0
+	}
 }
 
 // ================= Agent =================
@@ -1421,6 +1436,13 @@ func runAgent(server, token, id string) {
 
 	hostInfo, _ := host.Info()
 	osInfo := fmt.Sprintf("%s %s", hostInfo.Platform, hostInfo.PlatformVersion)
+
+	// CPU 型号在进程生命周期内不会变，循环外只读一次。
+	// cpu.Info() 要解析 /proc/cpuinfo，塞进 2 秒一次的循环里纯属浪费。
+	cpuModel := ""
+	if infos, err := cpu.Info(); err == nil && len(infos) > 0 {
+		cpuModel = strings.TrimSpace(infos[0].ModelName)
+	}
 
 	var lastIn, lastOut uint64
 	var lastTime time.Time
@@ -1445,6 +1467,17 @@ func runAgent(server, token, id string) {
 		cVal := 0.0
 		if len(cIdx) > 0 {
 			cVal = cIdx[0]
+		}
+		// gopsutil 在采集失败时返回的是 nil 指针而不是零值结构体，
+		// 直接 vm.UsedPercent 会 panic 掉整个 Agent（且是静默的，
+		// 面板上只表现为"节点突然离线"）。这里显式判空。
+		memUsedPct, memTotal := 0.0, uint64(0)
+		if vm != nil {
+			memUsedPct, memTotal = vm.UsedPercent, vm.Total
+		}
+		diskUsedPct, diskTotal := 0.0, uint64(0)
+		if du != nil {
+			diskUsedPct, diskTotal = du.UsedPercent, du.Total
 		}
 		curIn, curOut := uint64(0), uint64(0)
 		if len(nio) > 0 {
@@ -1506,11 +1539,14 @@ func runAgent(server, token, id string) {
 
 		s := SystemStatus{
 			AgentID: id, OS: osInfo, Uptime: uptime,
-			CPUUsage: cVal, MemUsedPercent: vm.UsedPercent, DiskUsedPercent: du.UsedPercent,
+			CPUUsage: cVal, MemUsedPercent: memUsedPct, DiskUsedPercent: diskUsedPct,
 			NetInSpeed: spIn, NetOutSpeed: spOut, NetTotalIn: curIn, NetTotalOut: curOut,
 			PingResults: latestPingResults,
 			Version:     BuildVersion,   // [新增] 上报自身版本，供面板判断是否需要更新
 			Arch:        runtime.GOARCH, // [新增] 上报架构，用于分发对应二进制
+			CPUModel:    cpuModel,       // [新增] CPU 型号，供面板展示硬件规格
+			MemTotal:    memTotal,       // [新增] 物理内存总量
+			DiskTotal:   diskTotal,      // [新增] 根分区总容量
 		}
 
 		d, _ := json.Marshal(s)

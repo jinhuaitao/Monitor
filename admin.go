@@ -31,6 +31,10 @@ import (
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/disk"
+	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v3/mem"
 	"gorm.io/gorm"
 )
 
@@ -356,6 +360,102 @@ func humanSize(n int64) string {
 	return fmt.Sprintf("%.1f %s", v, units[i])
 }
 
+// ================= 主机硬件规格 =================
+//
+// 概览页要展示面板所在机器的 CPU 型号 / 内存大小 / 硬盘大小。
+// 这类信息有两个特点，决定了下面的实现方式：
+//
+//	① 静态 —— CPU 型号、内存总容量、磁盘总容量在进程生命周期内不会变，
+//	   而「刷新」按钮会反复打这个接口，所以用 sync.Once 只采集一次；
+//	② 易失败 —— 容器里可能读不到 /proc/cpuinfo，非 root 可能 statfs 失败。
+//	   任何一个子项失败都只让该字段留空（前端显示「—」），
+//	   绝不能让整个接口 500 —— 系统信息页看不到东西，比少显示一项糟糕得多。
+
+type hostSpecStatic struct {
+	CPUModel  string
+	CPUCores  int
+	CPUMhz    float64
+	MemTotal  uint64
+	DiskTotal uint64
+	DiskPath  string
+	Hostname  string
+	Kernel    string
+	OSName    string
+}
+
+var (
+	hostSpecOnce sync.Once
+	hostSpecVal  hostSpecStatic
+)
+
+func hostStaticInfo() hostSpecStatic {
+	hostSpecOnce.Do(func() {
+		var h hostSpecStatic
+
+		if infos, err := cpu.Info(); err == nil && len(infos) > 0 {
+			h.CPUModel = strings.TrimSpace(infos[0].ModelName)
+			h.CPUMhz = infos[0].Mhz
+		}
+		// 逻辑核数（含超线程），比 cpu.Info() 里的物理 Cores 更贴近"能跑多少活"
+		if n, err := cpu.Counts(true); err == nil && n > 0 {
+			h.CPUCores = n
+		}
+		if vm, err := mem.VirtualMemory(); err == nil {
+			h.MemTotal = vm.Total
+		}
+		if path, total, ok := primaryDisk(); ok {
+			h.DiskPath, h.DiskTotal = path, total
+		}
+		if hi, err := host.Info(); err == nil {
+			h.Hostname = hi.Hostname
+			h.Kernel = hi.KernelVersion
+			h.OSName = strings.TrimSpace(hi.Platform + " " + hi.PlatformVersion)
+		}
+		hostSpecVal = h
+	})
+	return hostSpecVal
+}
+
+// primaryDisk 找出"根分区"的挂载点与总容量。
+//
+// 不能写死 disk.Usage("/")：Windows 上 "/" 必然失败。按平台依次尝试，
+// 全都失败再退化成"取第一个容量大于 0 的真实分区"——总比显示「—」强。
+func primaryDisk() (string, uint64, bool) {
+	candidates := []string{"/"}
+	if runtime.GOOS == "windows" {
+		if sysDrive := os.Getenv("SystemDrive"); sysDrive != "" {
+			candidates = []string{sysDrive + `\`, sysDrive}
+		}
+	}
+	for _, p := range candidates {
+		if du, err := disk.Usage(p); err == nil && du.Total > 0 {
+			return p, du.Total, true
+		}
+	}
+	if parts, err := disk.Partitions(false); err == nil {
+		for _, pt := range parts {
+			if du, err := disk.Usage(pt.Mountpoint); err == nil && du.Total > 0 {
+				return pt.Mountpoint, du.Total, true
+			}
+		}
+	}
+	return "", 0, false
+}
+
+// hostUsage 读取"当前"的内存与磁盘占用。这两项每次请求都要重新读。
+// 部分失败是安全的：失败的那项保持 0，前端按"未知"处理。
+func hostUsage(diskPath string) (memTotal, memUsed, diskTotal, diskUsed uint64) {
+	if vm, err := mem.VirtualMemory(); err == nil {
+		memTotal, memUsed = vm.Total, vm.Used
+	}
+	if diskPath != "" {
+		if du, err := disk.Usage(diskPath); err == nil {
+			diskTotal, diskUsed = du.Total, du.Used
+		}
+	}
+	return
+}
+
 // ================= 路由注册 =================
 
 func registerAdminRoutes(auth *gin.RouterGroup) {
@@ -391,7 +491,29 @@ func registerAdminRoutes(auth *gin.RouterGroup) {
 		alertDays := globalConfig.AlertKeepDays
 		globalConfig.RUnlock()
 
+		// 面板所在主机的硬件规格。静态部分走 sync.Once 缓存，
+		// 只有内存/磁盘的"已用量"每次重新读。
+		hs := hostStaticInfo()
+		hMemTotal, hMemUsed, hDiskTotal, hDiskUsed := hostUsage(hs.DiskPath)
+		if hMemTotal == 0 {
+			hMemTotal = hs.MemTotal
+		}
+		if hDiskTotal == 0 {
+			hDiskTotal = hs.DiskTotal
+		}
+
 		c.JSON(200, gin.H{
+			"hostname":        hs.Hostname,
+			"kernel":          hs.Kernel,
+			"os_name":         hs.OSName,
+			"cpu_model":       hs.CPUModel,
+			"cpu_cores":       hs.CPUCores,
+			"cpu_mhz":         hs.CPUMhz,
+			"mem_total":       hMemTotal,
+			"mem_used":        hMemUsed,
+			"disk_total":      hDiskTotal,
+			"disk_used":       hDiskUsed,
+			"disk_path":       hs.DiskPath,
 			"version":         displayVersion(),
 			"commit":          BuildCommit,
 			"build_time":      BuildTime,
