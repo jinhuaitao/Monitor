@@ -18,6 +18,12 @@ APP_ARGS="-mode server -port 8080"
 CURRENT_DIR=$(cd "$(dirname "$0")"; pwd)
 BIN_PATH="$CURRENT_DIR/$BIN_NAME"
 
+# 归一化镜像前缀：无论用户填不填结尾斜杠，拼接出的 URL 都合法
+MIRROR="${MIRROR%/}"
+if [ -n "$MIRROR" ]; then
+    MIRROR="$MIRROR/"
+fi
+
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -326,12 +332,18 @@ do_start() {
     INIT_SYS=$?
 
     if [ $INIT_SYS -eq 1 ]; then
-        systemctl start "$SERVICE_NAME"
+        systemctl start "$SERVICE_NAME" || {
+            printf '%b\n' "${RED}启动失败，请用『查看状态』检查服务日志。${NC}"
+            return 1
+        }
     elif [ $INIT_SYS -eq 2 ]; then
-        rc-service "$SERVICE_NAME" start
+        rc-service "$SERVICE_NAME" start || {
+            printf '%b\n' "${RED}启动失败，请检查 /var/log/messages。${NC}"
+            return 1
+        }
     else
         printf '%b\n' "${RED}未知的系统类型，无法启动。${NC}"
-        return
+        return 1
     fi
     printf '%b\n' "${GREEN}操作完成。${NC}"
 }
@@ -343,9 +355,9 @@ do_stop() {
     INIT_SYS=$?
 
     if [ $INIT_SYS -eq 1 ]; then
-        systemctl stop "$SERVICE_NAME"
+        systemctl stop "$SERVICE_NAME" || return 1
     elif [ $INIT_SYS -eq 2 ]; then
-        rc-service "$SERVICE_NAME" stop
+        rc-service "$SERVICE_NAME" stop || return 1
     fi
     printf '%b\n' "${GREEN}操作完成。${NC}"
 }
@@ -402,7 +414,8 @@ printf '%b\n' "0. 退出 (Exit)"
 printf '%b\n' "${BLUE}=====================================${NC}"
 
 printf "请输入数字 [0-6]: "
-read choice
+# -r：不吞掉反斜杠；输入仅作菜单选项，仍保持原样读取
+read -r choice
 
 case "$choice" in
     1) do_install ;;

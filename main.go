@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -11,18 +12,21 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
-	"io/ioutil"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"time"
 
@@ -93,6 +97,8 @@ var (
 		AuditKeepDays    int
 		// === 会话版本：改密码后自增，旧 Cookie 立即失效 ===
 		SessionEpoch string
+		// === Cookie 签名密钥：首次运行随机生成后持久化，重启后登录态不丢 ===
+		SessionKey string
 	}
 )
 
@@ -240,7 +246,10 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 `, binPath, server, token, id)
-	ioutil.WriteFile("/etc/systemd/system/monitor.service", []byte(serviceContent), 0644)
+	if err := os.WriteFile("/etc/systemd/system/monitor.service", []byte(serviceContent), 0644); err != nil {
+		fmt.Println("❌ 写入服务文件失败（需要 root 权限）:", err)
+		return
+	}
 	exec.Command("systemctl", "daemon-reload").Run()
 	exec.Command("systemctl", "enable", "monitor").Run()
 	exec.Command("systemctl", "restart", "monitor").Run()
@@ -256,7 +265,10 @@ command_args="-mode agent -server %s -token %s -id %s"
 command_background=true
 pidfile="/run/monitor.pid"
 `, binPath, server, token, id)
-	ioutil.WriteFile("/etc/init.d/monitor", []byte(scriptContent), 0755)
+	if err := os.WriteFile("/etc/init.d/monitor", []byte(scriptContent), 0755); err != nil {
+		fmt.Println("❌ 写入服务脚本失败（需要 root 权限）:", err)
+		return
+	}
 	exec.Command("rc-update", "add", "monitor").Run()
 	exec.Command("rc-service", "monitor", "restart").Run()
 	fmt.Println("✅ 安装成功! 服务已启动并设置开机自启。")
@@ -306,18 +318,22 @@ func runServer(port string) {
 	// 这里显式关掉信任代理，ClientIP()/RemoteIP() 一律回落到真实 TCP 对端。
 	_ = r.SetTrustedProxies(nil)
 
+	// 安全响应头。页面带有大量内联脚本/样式，上严格 CSP 会直接打挂界面；
+	// 这里启用三项零副作用的：禁止内容嗅探、限制同源内嵌、不泄露来源地址。
+	r.Use(func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "SAMEORIGIN")
+		c.Header("Referrer-Policy", "no-referrer")
+		c.Next()
+	})
+
 	// PWA：manifest / Service Worker / 运行时绘制的图标 / 离线页
 	registerPWARoutes(r)
 
-	// 安全增强: 随机生成 Session Key
-	var sessionKey []byte
-	if envKey := os.Getenv("SESSION_KEY"); envKey != "" {
-		sessionKey = []byte(envKey)
-	} else {
-		sessionKey = make([]byte, 32)
-		rand.Read(sessionKey)
-	}
-	store := cookie.NewStore(sessionKey)
+	// 会话密钥：优先用环境变量（容器编排场景注入），否则从数据库读取，
+	// 首次运行随机生成并持久化 —— 纯随机意味着面板每次重启（含自更新重启）
+	// 都会作废所有已登录会话，管理员会被反复踢下线。
+	store := cookie.NewStore(loadOrCreateSessionKey())
 	// 安全增强: Cookie 属性设置
 	store.Options(sessions.Options{Path: "/", MaxAge: 3600 * 24, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	r.Use(sessions.Sessions("mysession", store))
@@ -363,7 +379,7 @@ func runServer(port string) {
 		if clientToken == "" {
 			clientToken = c.Query("token")
 		}
-		if clientToken == "" || clientToken != t {
+		if clientToken == "" || !tokenEqual(clientToken, t) {
 			c.AbortWithStatus(401)
 			return
 		}
@@ -512,6 +528,10 @@ func runServer(port string) {
 				c.Redirect(302, "/")
 				return
 			}
+		} else {
+			// 用户名不存在时同样跑一次 bcrypt，把两种失败路径的耗时拉平：
+			// 否则「秒回」的必然是错误用户名，攻击者能靠计时差异枚举出管理员账号。
+			checkPwdUpgrade(p, loginDummyHash())
 		}
 
 		// 失败：累计计数并告知剩余次数（对真正的管理员有用，对爆破方只是延迟）
@@ -546,7 +566,7 @@ func runServer(port string) {
 				clientToken = c.Query("token")
 			} // 兼容旧方式
 
-			if clientToken != t {
+			if !tokenEqual(clientToken, t) {
 				c.AbortWithStatus(401)
 				return
 			}
@@ -611,7 +631,10 @@ func runServer(port string) {
 						db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "ping", Target: target, Value: float64(delay), CreatedAt: time.Now()})
 					}
 				}
-				if time.Now().Second() < 5 {
+				// 资源历史按节点限频采样（至少间隔 1 分钟）。
+				// 旧实现判断「挂钟秒数 < 5」，同一分钟可能采两次、也可能一次不采，
+				// 采到的时间点会规律性地偏斜，前端曲线因此失真。
+				if shouldSampleResources(s.AgentID) {
 					db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "cpu", Value: s.CPUUsage, CreatedAt: time.Now()})
 					db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "mem", Value: s.MemUsedPercent, CreatedAt: time.Now()})
 					db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "disk", Value: s.DiskUsedPercent, CreatedAt: time.Now()})
@@ -635,6 +658,9 @@ func runServer(port string) {
 				statusCache[s.AgentID] = s
 				cacheMutex.Unlock()
 				c.JSON(200, AgentResponse{Status: "ok", PingTargets: targets, Update: upd})
+			} else {
+				// 静默吞掉解析错误会返回 200 空响应，Agent 侧的故障从此无从排查
+				c.AbortWithStatus(400)
 			}
 		})
 
@@ -715,7 +741,8 @@ func runServer(port string) {
 			id := c.Query("id")
 			var history []MonitorHistory
 			db.Where("agent_id = ? AND type = 'ping'", id).Order("created_at desc").Limit(100).Find(&history)
-			var res []gin.H
+			// 初始化为空切片：无数据时序列化成 [] 而不是 null，前端无需判空
+			res := make([]gin.H, 0, len(history))
 			for i := len(history) - 1; i >= 0; i-- {
 				res = append(res, gin.H{"time": history[i].CreatedAt, "delay": history[i].Value, "target": history[i].Target})
 			}
@@ -949,6 +976,7 @@ func runServer(port string) {
 				delete(statusCache, id)
 				cacheMutex.Unlock()
 				clearNodeAlertState(id)
+				clearNodeSampleState(id)
 				audit(c, "node_delete", id, "删除节点："+n.Name, true)
 				c.Status(200)
 			})
@@ -1087,8 +1115,35 @@ func runServer(port string) {
 		}
 	}
 
-	fmt.Printf(">> http://localhost:%s\n", port)
-	r.Run(":" + port)
+	// 显式构造 http.Server 而不是 r.Run：默认 Server 没有任何读写超时，
+	// 一条慢连接（Slowloris 之类）就能长期占用服务资源。
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	go func() {
+		fmt.Printf(">> http://localhost:%s\n", port)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("面板监听端口 %s 失败: %v", port, err)
+		}
+	}()
+
+	// 优雅退出：收到 SIGINT/SIGTERM 后等在途请求收尾，
+	// 避免 SQLite 写到一半被中断、或响应只发出去半截。
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println(">> 面板正在优雅退出…")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("等待连接耗尽超时，强制退出: %v", err)
+	}
 }
 
 // randomToken 生成一个 24 位十六进制随机串，用于首次运行时的 Agent 通信 Token。
@@ -1111,6 +1166,38 @@ func randomEpoch() string {
 		return strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
 	return hex.EncodeToString(b)
+}
+
+// tokenEqual 以常量时间比较通信 Token。
+// Token 是 Agent 身份的唯一凭据，!= 会在首个不匹配字节短路，
+// 理论上留下计时侧信道；正确写法的成本为零，就没理由不用它。
+func tokenEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// loadOrCreateSessionKey 取 Cookie 签名密钥：
+// 环境变量优先（多实例部署可统一），否则读库，首次运行随机生成并持久化。
+// 必须持久化：密钥一换，所有已登录会话立即失效，
+// 而面板自更新本来就是「替换二进制 + 重启」，管理员不该每次更新都被踢下线。
+func loadOrCreateSessionKey() []byte {
+	if envKey := os.Getenv("SESSION_KEY"); envKey != "" {
+		return []byte(envKey)
+	}
+	globalConfig.RLock()
+	stored := globalConfig.SessionKey
+	globalConfig.RUnlock()
+	if k, err := hex.DecodeString(stored); err == nil && len(k) >= 32 {
+		return k
+	}
+	k := make([]byte, 32)
+	if _, err := rand.Read(k); err != nil {
+		log.Fatalf("无法生成会话密钥: %v", err)
+	}
+	saveConfig("session_key", hex.EncodeToString(k))
+	globalConfig.Lock()
+	globalConfig.SessionKey = hex.EncodeToString(k)
+	globalConfig.Unlock()
+	return k
 }
 
 func loadGlobalConfig() {
@@ -1202,6 +1289,8 @@ func loadGlobalConfig() {
 		// === 会话版本 ===
 		case "session_epoch":
 			globalConfig.SessionEpoch = c.Value
+		case "session_key":
+			globalConfig.SessionKey = c.Value
 		}
 	}
 
@@ -1347,6 +1436,15 @@ func authMiddleware() gin.HandlerFunc {
 // 登录体验几乎无感，但把离线爆破的成本抬高了几个数量级。
 const bcryptCost = 12
 
+// loginDummyHash 一个一次性随机 bcrypt 哈希，仅在「用户名不存在」时用它
+// 跑一次比对，把两种失败路径的响应耗时拉平（见 POST /login）。
+// 用 OnceValue 延迟到第一次登录失败才计算，不拖慢启动。
+var loginDummyHash = sync.OnceValue(func() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hashPwd(hex.EncodeToString(b))
+})
+
 // 安全增强: 密码哈希（bcrypt）
 func hashPwd(password string) string {
 	h, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
@@ -1429,13 +1527,44 @@ func sanitizeReport(s *SystemStatus) {
 
 // ================= Agent =================
 
+// resSampleAt 记录每个节点最近一次资源历史采样的时间。
+// 资源曲线只需要分钟级粒度，心跳却是秒级的，必须限频：
+// 既控制 monitor_histories 的膨胀速度，也让采样点均匀分布。
+var resSampleAt = struct {
+	sync.Mutex
+	m map[string]time.Time
+}{m: make(map[string]time.Time)}
+
+const resourceSampleInterval = time.Minute
+
+func shouldSampleResources(agentID string) bool {
+	resSampleAt.Lock()
+	defer resSampleAt.Unlock()
+	if last, ok := resSampleAt.m[agentID]; ok && time.Since(last) < resourceSampleInterval {
+		return false
+	}
+	resSampleAt.m[agentID] = time.Now()
+	return true
+}
+
+// clearNodeSampleState 节点删除后清掉采样记录，防止 map 无限增长
+func clearNodeSampleState(agentID string) {
+	resSampleAt.Lock()
+	delete(resSampleAt.m, agentID)
+	resSampleAt.Unlock()
+}
+
 func runAgent(server, token, id string) {
 	fmt.Printf("Agent -> %s (ID:%s)\n", server, id)
 	url := fmt.Sprintf("%s/api/report", server) // 移除 URL 参数
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	hostInfo, _ := host.Info()
-	osInfo := fmt.Sprintf("%s %s", hostInfo.Platform, hostInfo.PlatformVersion)
+	// host.Info() 在无权限或精简容器里可能返回错误，gopsutil 此时给的是 nil 指针，
+	// 直接取字段会 panic —— 而且 Agent 是被守护进程拉起的，崩了只表现为"节点莫名离线"。
+	osInfo := "unknown"
+	if hostInfo, err := host.Info(); err == nil && hostInfo != nil {
+		osInfo = fmt.Sprintf("%s %s", hostInfo.Platform, hostInfo.PlatformVersion)
+	}
 
 	// CPU 型号在进程生命周期内不会变，循环外只读一次。
 	// cpu.Info() 要解析 /proc/cpuinfo，塞进 2 秒一次的循环里纯属浪费。
@@ -1557,7 +1686,7 @@ func runAgent(server, token, id string) {
 		resp, err := client.Do(req)
 
 		if err == nil {
-			body, _ := ioutil.ReadAll(resp.Body)
+			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			var serverResp AgentResponse
 			if json.Unmarshal(body, &serverResp) == nil {

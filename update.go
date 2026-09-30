@@ -475,7 +475,9 @@ func tryDownload(url, dest, wantSHA string) error {
 		return err
 	}
 	h := sha256.New()
-	written, err := io.Copy(io.MultiWriter(f, h), resp.Body)
+	// 体积上限：更新源（或其镜像）被劫持后可能返回超大数据或无限流，
+	// 不设上限的话面板会一直写到磁盘撑爆为止。正常产物只有几十 MB。
+	written, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, maxDownloadSize+1))
 	f.Close()
 	if err != nil {
 		os.Remove(tmp)
@@ -485,17 +487,32 @@ func tryDownload(url, dest, wantSHA string) error {
 		os.Remove(tmp)
 		return fmt.Errorf("下载内容为空")
 	}
+	if written > maxDownloadSize {
+		os.Remove(tmp)
+		return fmt.Errorf("下载体积超过 %s 上限，疑似异常响应", humanSize(maxDownloadSize))
+	}
 	if wantSHA != "" {
 		got := hex.EncodeToString(h.Sum(nil))
 		if !strings.EqualFold(got, wantSHA) {
 			os.Remove(tmp)
-			return fmt.Errorf("校验失败 (%s ≠ %s)", got[:12], wantSHA[:12])
+			return fmt.Errorf("校验失败 (%s ≠ %s)", shortHash(got), shortHash(wantSHA))
 		}
 	}
 	if err := os.Chmod(tmp, 0755); err != nil {
 		return err
 	}
 	return os.Rename(tmp, dest)
+}
+
+// maxDownloadSize 单个更新包允许的最大体积（512 MiB）
+const maxDownloadSize = 512 << 20
+
+// shortHash 供报错信息展示用的截断；直接 s[:12] 在远端返回畸形短串时会 panic
+func shortHash(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }
 
 // ================= 自身路径 / 重启 =================
@@ -830,7 +847,8 @@ func doAgentUpdate(server, token string, upd UpdateCommand) error {
 		return err
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), resp.Body)
+	// 同样设置体积上限：面板（或中间的镜像）异常时不能把节点磁盘写爆
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, maxDownloadSize+1))
 	f.Close()
 	if err != nil {
 		os.Remove(tmp)
@@ -839,6 +857,10 @@ func doAgentUpdate(server, token string, upd UpdateCommand) error {
 	if n == 0 {
 		os.Remove(tmp)
 		return fmt.Errorf("下载内容为空")
+	}
+	if n > maxDownloadSize {
+		os.Remove(tmp)
+		return fmt.Errorf("下载体积异常（超过 %s），已放弃更新", humanSize(maxDownloadSize))
 	}
 	if upd.SHA256 != "" && !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), upd.SHA256) {
 		os.Remove(tmp)

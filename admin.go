@@ -876,7 +876,7 @@ func registerAdminRoutes(auth *gin.RouterGroup) {
 					okText = "失败"
 				}
 				ts := v.CreatedAt.Format("2006-01-02 15:04:05")
-				records = append(records, []string{ts, v.Username, v.IP, v.Action, v.Target, v.Detail, okText})
+				records = append(records, []string{ts, csvSafe(v.Username), csvSafe(v.IP), csvSafe(v.Action), csvSafe(v.Target), csvSafe(v.Detail), okText})
 				objects = append(objects, map[string]interface{}{
 					"time": ts, "username": v.Username, "ip": v.IP,
 					"action": v.Action, "target": v.Target, "detail": v.Detail, "success": v.Success,
@@ -889,7 +889,7 @@ func registerAdminRoutes(auth *gin.RouterGroup) {
 			db.Order("created_at DESC").Limit(100000).Find(&list)
 			for _, v := range list {
 				ts := v.CreatedAt.Format("2006-01-02 15:04:05")
-				records = append(records, []string{ts, v.AgentID, v.NodeName, kindLabelOf(v.Kind), levelLabelOf(v.Level), v.Message})
+				records = append(records, []string{ts, csvSafe(v.AgentID), csvSafe(v.NodeName), kindLabelOf(v.Kind), levelLabelOf(v.Level), csvSafe(v.Message)})
 				objects = append(objects, map[string]interface{}{
 					"time": ts, "agent_id": v.AgentID, "node_name": v.NodeName,
 					"kind": v.Kind, "level": v.Level, "message": v.Message,
@@ -903,7 +903,7 @@ func registerAdminRoutes(auth *gin.RouterGroup) {
 			for _, v := range list {
 				ts := v.CreatedAt.Format("2006-01-02 15:04:05")
 				val := strconv.FormatFloat(v.Value, 'f', -1, 64)
-				records = append(records, []string{ts, v.AgentID, v.Type, v.Target, val})
+				records = append(records, []string{ts, csvSafe(v.AgentID), csvSafe(v.Type), csvSafe(v.Target), val})
 				objects = append(objects, map[string]interface{}{
 					"time": ts, "agent_id": v.AgentID, "type": v.Type,
 					"target": v.Target, "value": v.Value,
@@ -1017,6 +1017,7 @@ func registerAdminRoutes(auth *gin.RouterGroup) {
 			cacheMutex.Unlock()
 			for _, id := range ids {
 				clearNodeAlertState(id)
+				clearNodeSampleState(id)
 			}
 		case "hide":
 			affected = db.Model(&Node{}).Where("agent_id IN ?", ids).Update("hide_id", true).RowsAffected
@@ -1114,6 +1115,21 @@ func pushAgentUpdateBatch(ids []string) (int, error) {
 	}
 	res := db.Model(&Node{}).Where("agent_id IN ?", ids).Update("pending_update", bundle)
 	return int(res.RowsAffected), res.Error
+}
+
+// csvSafe 防 CSV 公式注入。
+// 导出的文本（操作者、节点名、告警内容……）归根结底是攻击者可控的输入，
+// Excel/WPS 会把以 = + - @ 开头的单元格当公式求值 —— 看一份报表
+// 不该变成执行入口。前置单引号让它按字面文本显示。
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	}
+	return s
 }
 
 // ================= 备份校验 =================
