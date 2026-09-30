@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // onlineWindow 判定「节点在线」的时间窗口。
@@ -158,7 +159,10 @@ func recordAlertEvent(agentID, nodeName, kind, level, msg string) {
 		NodeName:  cleanField(nodeName, 64),
 		Kind:      cleanField(kind, 16),
 		Level:     cleanField(level, 16),
-		Message:   cleanField(msg, 500),
+		// 用 cleanMultiline 而不是 cleanField：告警文案本身是多行的，
+		// 前端会按 \n 拆开用 " · " 连接。cleanField 会把换行当控制字符删掉，
+		// 于是历史记录里所有字段粘成一整串，分隔符永远不会出现。
+		Message: cleanMultiline(msg, 500),
 	}
 	if err := db.Create(&ev).Error; err != nil {
 		log.Printf("[alert] 事件落库失败: %v", err)
@@ -253,10 +257,26 @@ func runAlertScan() {
 		checkThreshold(s.AgentID, display, "disk", "磁盘使用率", s.DiskUsedPercent, rule.Disk, rule.CooldownMin)
 	}
 
-	// 清理已经不在缓存里的节点的状态（比如节点被删除后重启过面板）
+	pruneAlertStates(seen)
+}
+
+// pruneAlertStates 清掉「已经不在缓存里」的节点的告警状态（比如节点被删除后
+// 面板重启过），防止 alertStates 这个 map 只增不减。
+//
+// seen 是本轮仍然存在的节点 ID 集合。
+//
+// 单独抽成函数是为了能被直接测到：下面这个键拆分必须用 LastIndex，
+// 而 runAlertScan 需要数据库与实时缓存才能跑起来，很难单独构造场景。
+func pruneAlertStates(seen map[string]bool) {
 	alertStates.Lock()
+	defer alertStates.Unlock()
 	for key, e := range alertStates.m {
-		idx := strings.Index(key, "|")
+		// 状态键是 agentID + "|" + kind，而 kind 只可能是
+		// offline / cpu / mem / disk 这四个固定常量，绝不含 "|"。
+		// 反过来 AgentID 来自 Agent 上报，无法保证不含 "|" ——
+		// 若用 Index 按第一个 "|" 拆，ID 里一旦带 "|" 拆出来的就不是完整 ID，
+		// 这些状态会永远匹配不上 seen，map 只增不减。
+		idx := strings.LastIndex(key, "|")
 		if idx < 0 {
 			delete(alertStates.m, key)
 			continue
@@ -265,7 +285,6 @@ func runAlertScan() {
 			delete(alertStates.m, key)
 		}
 	}
-	alertStates.Unlock()
 }
 
 // checkThreshold 单条阈值规则。limit <= 0 视为关闭该规则。
@@ -507,19 +526,26 @@ func registerAlertRoutes(auth *gin.RouterGroup) {
 		kind := cleanField(c.Query("kind"), 16)
 		agentID := cleanField(c.Query("id"), 64)
 
-		tx := db.Model(&AlertEvent{})
-		if kind != "" && kind != "all" {
-			tx = tx.Where("kind = ?", kind)
-		}
-		if agentID != "" {
-			tx = tx.Where("agent_id = ?", agentID)
+		// 查询条件构造两次而不是复用同一个 *gorm.DB：
+		// Count 之后继续 Find 会把 count 语句的状态带过去，
+		// 拿到的是「按 kind 分组后」的行数/结果集而不是明细。
+		// admin.go 的审计查询出于同样的原因也是这么写的，两处保持一致。
+		build := func() *gorm.DB {
+			tx := db.Model(&AlertEvent{})
+			if kind != "" && kind != "all" {
+				tx = tx.Where("kind = ?", kind)
+			}
+			if agentID != "" {
+				tx = tx.Where("agent_id = ?", agentID)
+			}
+			return tx
 		}
 
 		var total int64
-		tx.Count(&total)
+		build().Count(&total)
 
 		rows := make([]AlertEvent, 0, limit)
-		tx.Order("created_at DESC").Limit(limit).Find(&rows)
+		build().Order("created_at DESC").Limit(limit).Find(&rows)
 
 		// 按类型统计，让「告警设置」页一眼看出哪类问题最多
 		var byKind = make([]struct {
