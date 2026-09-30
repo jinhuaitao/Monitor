@@ -1384,7 +1384,11 @@ function saveAppearance(){
 }
 
 /* ================= 渲染 ================= */
-function isOnline(s){return (new Date()-new Date(s.last_update))/1000 < 25;}
+/* 在线判定窗口由后端下发（onlineWindow），前端不再自己写 25。
+   两处各写一个魔数时，「面板显示在线、告警已经判离线」这种自相矛盾的
+   状态迟早会出现，而且极难解释。 */
+var onlineWindowSec={{ .OnlineWindow }};
+function isOnline(s){return (new Date()-new Date(s.last_update))/1000 < onlineWindowSec;}
 function barColor(v,warn,danger){
   if(v>=danger) return 'var(--danger)'; if(v>=warn) return 'var(--warning)'; return 'var(--primary)';
 }
@@ -1464,16 +1468,18 @@ function buildCard(id){
   setTimeout(function(){c.classList.remove('anim-in');},450);
   return c;
 }
-/* 页脚胶囊：文本必须包一层 .chip-txt，flex 容器直接放文本无法出省略号 */
+/* 页脚胶囊：文本必须包一层 .chip-txt，flex 容器直接放文本无法出省略号。
+   title 在函数内部再转义一次：调用方目前都传的是已转义值，但把「拼进
+   HTML 属性」这件事和「谁来转义」绑在一起，下一个人加调用点时就容易漏。 */
 function chipHtml(inner,title){
-  return '<span class="chip"'+(title?' title="'+title+'"':'')+'><span class="chip-txt">'+inner+'</span></span>';
+  return '<span class="chip"'+(title?' title="'+escapeHtml(title)+'"':'')+'><span class="chip-txt">'+inner+'</span></span>';
 }
 function footHtml(s){
   var p=pingOf(s);
   return chipHtml('↓ <b>'+fmtBytes(s.net_in_speed)+'</b>/s')+
     chipHtml('↑ <b>'+fmtBytes(s.net_out_speed)+'</b>/s')+
     chipHtml('⏱ '+fmtUptime(s.uptime))+
-    chipHtml('📶 '+(p.val||'—'),p.name?escapeHtml(p.name):'');
+    chipHtml('📶 '+(p.val||'—'),p.name);
 }
 function updateCard(card,s){
   var on=isOnline(s);
@@ -1807,7 +1813,13 @@ function loadNodeList(){
     if(s.maintenance) chips+='<span class="g-chip maint">维护中</span>';
     if(s.alert_muted) chips+='<span class="g-chip mute">已静音</span>';
 
-    html+='<div class="node-row">'+
+    // 安全要点：agent_id 来自 /api/report，属于不可信输入（任何持有 Token 的
+    // 客户端都能自报一个任意 ID）。这里一律只把 ID 写进 data-id 属性（经
+    // escapeHtml），动作按钮只带固定的 data-act 常量，由事件委托去取 ID ——
+    // 不再把 ID 拼进 onclick 字符串。拼进内联处理器时，HTML 属性会先把
+    // &#039; 解码回单引号，escapeHtml 那层保护会被原样吃掉，等于给了
+    // 一个「持有 Token 即可升级为管理员会话」的存储型 XSS。
+    html+='<div class="node-row" data-id="'+escapeHtml(id)+'">'+
       '<input type="checkbox" class="pick" data-id="'+escapeHtml(id)+'"'+(picked[id]?' checked':'')+' onchange="togglePick(this)">'+
       '<div style="flex:1;min-width:150px">'+
         '<div style="font-weight:600;font-size:14px;display:flex;align-items:center;gap:7px;flex-wrap:wrap">'+
@@ -1816,23 +1828,26 @@ function loadNodeList(){
           escapeHtml(id)+' · '+escapeHtml(ver)+' · '+escapeHtml(s.arch||'?')+'</div>'+
       '</div>'+
       '<div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">'+
-        '<button class="btn-outline btn-sm" style="opacity:'+(s.hide_id?.45:1)+'" onclick="toggleHide(\''+id+'\')" title="显示/隐藏 ID">👁️</button>'+
-        '<button class="btn-outline btn-sm'+(s.maintenance?' on-warn':'')+'" onclick="toggleMeta(\''+id+'\',\'maintenance\','+(s.maintenance?'false':'true')+')" title="维护模式：期间不触发任何告警">🔧</button>'+
-        '<button class="btn-outline btn-sm" style="opacity:'+(s.alert_muted?.5:1)+'" onclick="toggleMeta(\''+id+'\',\'alert_muted\','+(s.alert_muted?'false':'true')+')" title="静音告警">🔔</button>'+
-        '<input type="number" class="input-text" style="width:62px;padding:7px;text-align:center" value="'+(s.sort_order||0)+'" placeholder="排序" id="s-'+id+'">'+
-        '<input type="text" class="input-text" style="width:120px;padding:7px" value="'+escapeHtml(s.name||'')+'" placeholder="设置别名" id="n-'+id+'">'+
-        '<input type="text" class="input-text" style="width:96px;padding:7px" value="'+escapeHtml(s.group||'')+'" placeholder="分组" id="g-'+id+'">'+
-        '<button class="btn-primary btn-sm" onclick="saveNode(\''+id+'\')">保存</button>'+
-        '<button class="btn-outline btn-sm" onclick="copyInstallCmd(\''+id+'\')" title="复制安装命令（自动识别 amd64 / arm64）">📋</button>'+
-        '<button class="btn-del" onclick="deleteNode(\''+id+'\')" title="删除节点">🗑️</button>'+
+        '<button class="btn-outline btn-sm" style="opacity:'+(s.hide_id?.45:1)+'" data-act="hide" title="显示/隐藏 ID">👁️</button>'+
+        '<button class="btn-outline btn-sm'+(s.maintenance?' on-warn':'')+'" data-act="maint" title="维护模式：期间不触发任何告警">🔧</button>'+
+        '<button class="btn-outline btn-sm" style="opacity:'+(s.alert_muted?.5:1)+'" data-act="mute" title="静音告警">🔔</button>'+
+        '<input type="number" class="input-text n-sort" style="width:62px;padding:7px;text-align:center" value="'+(s.sort_order||0)+'" placeholder="排序">'+
+        '<input type="text" class="input-text n-name" style="width:120px;padding:7px" value="'+escapeHtml(s.name||'')+'" placeholder="设置别名">'+
+        '<input type="text" class="input-text n-group" style="width:96px;padding:7px" value="'+escapeHtml(s.group||'')+'" placeholder="分组">'+
+        '<button class="btn-primary btn-sm" data-act="save">保存</button>'+
+        '<button class="btn-outline btn-sm" data-act="copy" title="复制安装命令（自动识别 amd64 / arm64）">📋</button>'+
+        '<button class="btn-del" data-act="del" title="删除节点">🗑️</button>'+
       '</div></div>';
   });
   el.innerHTML=html;
   updatePickCount();
 }
-function saveNode(id){
-  var n=document.getElementById('n-'+id).value, so=document.getElementById('s-'+id).value,
-      g=document.getElementById('g-'+id).value;
+/* 保存节点信息。入参是整行元素而不是 ID 字符串：
+   输入框改用 class 定位，节点 ID 就不必再出现在任何 HTML 属性里。 */
+function saveNodeRow(row){
+  var id=row.getAttribute('data-id');
+  var n=row.querySelector('.n-name').value, so=row.querySelector('.n-sort').value,
+      g=row.querySelector('.n-group').value;
   fetch('/api/settings/update_node',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:'id='+encodeURIComponent(id)+'&name='+encodeURIComponent(n)+'&sort='+encodeURIComponent(so)+'&group='+encodeURIComponent(g)})
   .then(function(){loadNodeList();renderGroupFilter();updateStats();toast('节点信息已更新','ok');});
@@ -1986,7 +2001,7 @@ function renderAgentUpdateList(){
       '<div style="font-size:11.5px;color:var(--text-mute);font-family:Menlo,monospace;margin-top:2px">'+escapeHtml(id)+' · '+escapeHtml(s.arch||'?')+'</div></div>'+
       '<span class="badge '+cls+'">'+badge+'</span>'+
       '<span class="ver-chip" style="margin-right:2px">'+escapeHtml(v==='dev'?'dev':'v'+v)+'</span>'+
-      '<button class="btn-primary btn-sm" onclick="pushUpdate(\''+id+'\')">更新</button>'+
+      '<button class="btn-primary btn-sm" data-push="'+escapeHtml(id)+'">更新</button>'+
     '</div>';
   });
   // 内容没变就不重建：避免每 2 秒覆盖一次，导致正在点击的按钮失效
@@ -2266,7 +2281,7 @@ function loadSecurity(){
     document.getElementById('securityHint').innerHTML=
       '登录保护策略：同一来源连续失败 <b>'+d.max_fails+' 次</b>后锁定 <b>'+d.lock_minutes+' 分钟</b>，'+
       '失败计数在 <b>'+d.window_minutes+' 分钟</b>内有效。<br>'+
-      '限流按<b>真实 TCP 来源地址</b>计数，不采信 <code>X-Forwarded-For</code> —— 否则请求方随手改个头就能绕过。'+
+      '限流按<b>真实来源地址</b>计数：对端不在可信代理列表内时一律忽略 <code>X-Forwarded-For</code>（否则请求方随手改个头就能绕过）；'+'对端可信时从右往左解析出真实客户端（否则反代部署下所有人共用一个桶，一个人就能把大家全锁住）。<br>'+'当前可信代理：<code>'+escapeHtml(d.trusted_proxies||'（无）')+'</code>（环境变量 <code>TRUSTED_PROXIES</code> 可调整）<br>'+
       '另外这里刻意<b>不按用户名锁定</b>：那样攻击者只要狂刷管理员用户名，就能把真正的管理员挡在门外。<br>'+
       '密码哈希算法：bcrypt（cost '+d.bcrypt_cost+'）。当前会话版本：<code>'+escapeHtml(d.session_epoch||'')+'</code>';
     var body=document.getElementById('securityBody');
@@ -2507,6 +2522,36 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeSettin
     fetch('/api/settings/account/unlock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:'ip='+encodeURIComponent(ip)})
     .then(function(){ toast('已解除 '+ip+' 的锁定','ok'); loadSecurity(); });
+  });
+
+  /* 节点列表：按钮只带固定的 data-act，节点 ID 统一从最近的 .node-row 上取。
+     这样 ID 永远不进入任何 HTML 属性以外的解析上下文，也就不存在
+     「拼进 onclick 后被 HTML 实体解码还原」这条注入路径。 */
+  var nl=document.getElementById('nodeList');
+  if(nl) nl.addEventListener('click',function(e){
+    var btn=e.target.closest?e.target.closest('[data-act]'):null;
+    if(!btn) return;
+    var row=btn.closest('.node-row');
+    if(!row) return;
+    var id=row.getAttribute('data-id');
+    var s=statsData[id]||{};
+    switch(btn.getAttribute('data-act')){
+      case 'hide':  toggleHide(id); break;
+      case 'maint': toggleMeta(id,'maintenance',!s.maintenance); break;
+      case 'mute':  toggleMeta(id,'alert_muted',!s.alert_muted); break;
+      case 'save':  saveNodeRow(row); break;
+      case 'copy':  copyInstallCmd(id); break;
+      case 'del':   deleteNode(id); break;
+    }
+  });
+
+  /* 客户端更新列表同理。注意该列表在内容未变时会跳过重建，
+     所以这里必须用委托 —— 逐按钮绑定会在重建时被整体丢掉。 */
+  var al=document.getElementById('agentUpdateList');
+  if(al) al.addEventListener('click',function(e){
+    var b=e.target.closest?e.target.closest('[data-push]'):null;
+    if(!b) return;
+    pushUpdate(b.getAttribute('data-push'));
   });
 })();
 initConfigDisplay();

@@ -583,20 +583,89 @@ func buildRestartLine(target, fallbackService string) string {
 	return strings.Join(parts, " || ")
 }
 
+// listenPortFromArgs 从启动参数里取 -port，取不到返回空串。
+// 更新脚本用它决定要不要做「新版本起来了吗」的健康校验。
+func listenPortFromArgs() string {
+	for i, a := range os.Args {
+		if a == "-port" && i+1 < len(os.Args) {
+			return strings.TrimSpace(os.Args[i+1])
+		}
+		if v, ok := strings.CutPrefix(a, "-port="); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// buildUpdateScript 生成「替换二进制并重启」的 shell 脚本。
+//
+// 单独抽成函数是为了能对它做测试（脚本语法错误会直接让更新把服务弄没，
+// 但这条路径在开发机上几乎不会被执行到）。测试里会跑 sh -n 校验语法。
+//
+// 几个关键取舍：
+//
+//  1. 只做一次 mv，不要先 rm。
+//     rename(2) 是原子的：新二进制直接覆盖目标目录项，运行中的旧进程继续
+//     持有旧 inode 直到自己退出。而「先 rm 再 mv」会留下一个真实存在的
+//     窗口 —— 这期间目标文件不存在，一旦 mv 失败（磁盘满、权限被改、
+//     临时目录与目标不同分区），面板/节点就【永久】失去了可执行文件，
+//     且没有任何自动恢复路径。
+//
+//  2. mv 失败时回退到「同目录复制 + 原子替换」。
+//     newPath 与 target 不在同一文件系统时 rename 会返回 EXDEV，
+//     先复制到目标同目录再 mv 才能保证最后一步仍是原子的。
+//
+//  3. 只有 curl 存在时才做健康校验。
+//     缺 curl 的环境如果照样跑校验，会因为「永远探不通」而把一次
+//     成功的更新回滚掉 —— 那比不校验更糟。
+func buildUpdateScript(newPath, target, serviceName string) string {
+	wd, _ := os.Getwd()
+	backup := target + ".old"
+	restart := buildRestartLine(target, serviceName)
+
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("sleep 3\n")
+	// 留一份更新前的二进制，健康校验失败时用来回滚
+	b.WriteString("cp -f " + shellQuote(target) + " " + shellQuote(backup) + " 2>/dev/null || true\n")
+	b.WriteString("if ! mv -f " + shellQuote(newPath) + " " + shellQuote(target) + "; then\n")
+	b.WriteString("  cp -f " + shellQuote(newPath) + " " + shellQuote(target+".new") + " || exit 1\n")
+	b.WriteString("  mv -f " + shellQuote(target+".new") + " " + shellQuote(target) + " || exit 1\n")
+	b.WriteString("fi\n")
+	b.WriteString("chmod 755 " + shellQuote(target) + "\n")
+	b.WriteString("cd " + shellQuote(wd) + "\n")
+	b.WriteString(restart + "\n")
+
+	if port := listenPortFromArgs(); port != "" {
+		probe := shellQuote("http://127.0.0.1:" + port + "/healthz")
+		b.WriteString("if command -v curl >/dev/null 2>&1; then\n")
+		b.WriteString("  i=0\n")
+		b.WriteString("  while [ $i -lt 25 ]; do\n")
+		b.WriteString("    if curl -fsS -m 2 " + probe + " >/dev/null 2>&1; then break; fi\n")
+		b.WriteString("    sleep 2\n")
+		b.WriteString("    i=$((i+1))\n")
+		b.WriteString("  done\n")
+		// 50 秒都没起来 → 回滚到更新前的二进制再重启一次。
+		// 没有这一步的话，「新版本起不来」只能靠人 SSH 上去手动救。
+		b.WriteString("  if [ $i -ge 25 ] && [ -f " + shellQuote(backup) + " ]; then\n")
+		b.WriteString("    mv -f " + shellQuote(backup) + " " + shellQuote(target) + "\n")
+		b.WriteString("    chmod 755 " + shellQuote(target) + "\n")
+		b.WriteString("    " + restart + "\n")
+		b.WriteString("  fi\n")
+		b.WriteString("fi\n")
+	}
+
+	b.WriteString("rm -f \"$0\"\n")
+	return b.String()
+}
+
 // applyUpdateAndRestart 用新二进制替换自身并重启（脚本会脱离父进程执行）
 //
 // 时序说明：调用方随即退出进程，脚本等待 3 秒确保旧进程已释放端口，
 // 再替换二进制并拉起服务，避免新旧实例抢占监听端口。
 func applyUpdateAndRestart(newPath, target, serviceName string) error {
 	wd, _ := os.Getwd()
-	script := "#!/bin/sh\n" +
-		"sleep 3\n" +
-		"rm -f " + shellQuote(target) + "\n" +
-		"mv " + shellQuote(newPath) + " " + shellQuote(target) + "\n" +
-		"chmod 755 " + shellQuote(target) + "\n" +
-		"cd " + shellQuote(wd) + "\n" +
-		buildRestartLine(target, serviceName) + "\n" +
-		"rm -f \"$0\"\n"
+	script := buildUpdateScript(newPath, target, serviceName)
 
 	sp := filepath.Join(os.TempDir(), fmt.Sprintf("monitor-upd-%d.sh", os.Getpid()))
 	if err := os.WriteFile(sp, []byte(script), 0755); err != nil {

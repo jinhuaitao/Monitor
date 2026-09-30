@@ -143,6 +143,11 @@ download_binary() {
         EXPECT=$(curl -fsSL --connect-timeout 20 "$SHA_URL" 2>/dev/null | awk '{print $1}')
         if [ -z "$EXPECT" ]; then
             printf '%b\n' "${YELLOW}未获取到校验文件，跳过完整性校验。${NC}"
+            if ! verify_binary "$BIN_PATH" "${ASSET_NAME##*-}"; then
+                rm -f "$BIN_PATH"
+                ATTEMPT=$((ATTEMPT + 1))
+                continue
+            fi
             chmod +x "$BIN_PATH"
             return 0
         fi
@@ -150,12 +155,24 @@ download_binary() {
         ACTUAL=$(sha256_of "$BIN_PATH")
         if [ -z "$ACTUAL" ]; then
             printf '%b\n' "${YELLOW}系统缺少 sha256 工具，跳过完整性校验。${NC}"
+            if ! verify_binary "$BIN_PATH" "${ASSET_NAME##*-}"; then
+                rm -f "$BIN_PATH"
+                ATTEMPT=$((ATTEMPT + 1))
+                continue
+            fi
             chmod +x "$BIN_PATH"
             return 0
         fi
 
         if [ "$EXPECT" = "$ACTUAL" ]; then
             printf '%b\n' "${GREEN}SHA256 校验通过。${NC}"
+            # 哈希只证明「和发布方给出的值一致」，不证明「它是个能跑的程序」。
+            # 源坏掉时哈希与文件会一起坏，所以这里还要独立体检一次。
+            if ! verify_binary "$BIN_PATH" "${ASSET_NAME##*-}"; then
+                rm -f "$BIN_PATH"
+                ATTEMPT=$((ATTEMPT + 1))
+                continue
+            fi
             chmod +x "$BIN_PATH"
             return 0
         fi
@@ -175,6 +192,52 @@ download_binary() {
     printf '%b\n' "  1) 仓库正在发布新版本，GitHub 覆盖 Release 资源需数秒 —— 稍等 1 分钟后重试"
     printf '%b\n' "  2) 网络中间层改写了下载内容 —— 可在脚本顶部设置 MIRROR=\"https://ghfast.top/\" 后重试"
     return 1
+}
+
+# --- 辅助函数：体检下载到的二进制 ---
+#
+# 为什么 sha256 通过之后还要再体检一次：
+# 哈希来自同一个 Release，源坏了哈希和文件会一起坏，校验永远通过。
+# 而这里装的是「开机自启、以 root 身份运行、并且能反向控制面板」的进程 ——
+# 装错一个文件不是「服务起不来」这么简单。所以再独立确认两件事：
+# 它确实是个 ELF 可执行文件（不是 GitHub 的错误页、不是被截断的下载），
+# 以及它的机器类型与目标架构一致（拿错架构的二进制只会报
+# "cannot execute binary file"，比下载失败更难排查）。
+#
+# 用 od 而不是 readelf/file：busybox 环境下 readelf 常常不存在。
+verify_binary() {
+    FILE="$1"
+    WANT_ARCH="$2"
+
+    SIZE=$(wc -c < "$FILE" 2>/dev/null || echo 0)
+    if [ "$SIZE" -lt 1048576 ]; then
+        printf '%b\n' "${RED}体检失败：文件仅 ${SIZE} 字节，不是完整的程序（多半是错误页或被截断）${NC}"
+        return 1
+    fi
+
+    # ELF 魔数 7f 45 4c 46
+    MAGIC=$(od -An -tx1 -N4 "$FILE" 2>/dev/null | tr -d ' \n')
+    if [ "$MAGIC" != "7f454c46" ]; then
+        printf '%b\n' "${RED}体检失败：文件头不是 ELF（magic=${MAGIC}），不是可执行程序${NC}"
+        return 1
+    fi
+
+    # e_machine 位于 ELF64 头偏移 18 处，小端两字节
+    #   x86-64  = 0x3e -> "3e00"
+    #   aarch64 = 0xb7 -> "b700"
+    MACHINE=$(od -An -tx1 -j18 -N2 "$FILE" 2>/dev/null | tr -d ' \n')
+    case "$WANT_ARCH" in
+        amd64) WANT="3e00" ;;
+        arm64) WANT="b700" ;;
+        *)     WANT="" ;;
+    esac
+    if [ -n "$WANT" ] && [ "$MACHINE" != "$WANT" ]; then
+        printf '%b\n' "${RED}体检失败：架构不匹配（machine=${MACHINE}，期望 ${WANT} / ${WANT_ARCH}）${NC}"
+        return 1
+    fi
+
+    printf '%b\n' "${GREEN}二进制体检通过：ELF / ${WANT_ARCH} / ${SIZE} 字节${NC}"
+    return 0
 }
 
 # --- 辅助函数：等待旧进程完全退出（避免覆盖正在运行的二进制） ---
@@ -287,6 +350,32 @@ EOF
 
     # 安装成功后清理备份
     rm -f "$BIN_PATH.bak"
+
+    # 起没起来要真的看一眼，不能只看 systemctl / rc-service 的返回码：
+    # unit 语法正确但进程秒退时它们同样返回 0，使用者会以为装好了，
+    # 直到几天后发现面板上一直什么都没有。
+    if command -v pgrep >/dev/null 2>&1; then
+        i=0
+        while [ "$i" -lt 10 ]; do
+            if pgrep -f "$BIN_PATH" >/dev/null 2>&1; then
+                printf '%b\n' "${GREEN}服务进程已就绪。${NC}"
+                break
+            fi
+            sleep 1
+            i=$((i + 1))
+        done
+        if [ "$i" -ge 10 ]; then
+            printf '%b\n' "${RED}警告: 服务进程未在 10 秒内启动，请检查下方输出。${NC}"
+            if [ -f /tmp/monitor.log ]; then
+                printf '%b\n' "${YELLOW}--- /tmp/monitor.log 末尾 ---${NC}"
+                tail -n 20 /tmp/monitor.log
+            fi
+            if command -v journalctl >/dev/null 2>&1; then
+                printf '%b\n' "${YELLOW}--- journalctl 末尾 ---${NC}"
+                journalctl -u "$SERVICE_NAME" -n 20 --no-pager 2>/dev/null || true
+            fi
+        fi
+    fi
 
     # 展示服务状态与当前版本，便于确认更新是否真正生效
     do_status

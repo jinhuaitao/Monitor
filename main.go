@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -11,19 +12,24 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
-	"io/ioutil"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+
 	"time"
+
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
@@ -97,6 +103,62 @@ var (
 // errSetupClosed 表示面板已完成初始化，/setup 的建号入口必须关闭
 var errSetupClosed = errors.New("setup already completed")
 
+// ================= 上报链路的资源上限 =================
+//
+// /api/report 是唯一一个「外部进程可以反复调用、且每次都会写库」的入口。
+// 下面这些常量把它的成本钉死在一个可预期的范围内：拿不到上限的话，
+// 单个持有 Token 的客户端就足以把面板的内存或磁盘吃干净。
+const (
+	// maxReportBytes 单次心跳报文上限。正常心跳只有几 KB。
+	maxReportBytes = 256 << 10
+	// maxPingTargetsPerReport 单次心跳携带的 ping 目标数上限。
+	maxPingTargetsPerReport = 64
+	// maxPingDelayMs 单条延迟的合理上限（5 分钟），超出视为异常值丢弃。
+	maxPingDelayMs = 5 * 60 * 1000
+	// maxAutoRegisterNodes 允许自动注册的节点总数上限。
+	maxAutoRegisterNodes = 5000
+)
+
+// geoClient 专用于地理位置查询的客户端。
+//
+// 原实现用的是 http.Get，也就是 http.DefaultClient —— 它【没有超时】。
+// 第三方接口一旦挂住，这个 goroutine 会永久泄漏；而查询是每次心跳都可能
+// 触发的，节点多的时候会稳定地一秒钟泄漏一个 goroutine。
+var geoClient = &http.Client{Timeout: 5 * time.Second}
+
+// lookupCountryCode 异步补全节点的国家代码。
+//
+// 说明：ip-api.com 的免费接口只支持明文 HTTP（HTTPS 需付费），所以这里
+// 仍是 http —— 也就是说节点 IP 会经过一段明文链路。要彻底解决只能换
+// 服务商或自建 IP 库，属于产品决策，不在本轮改动范围内。
+// 本函数负责的是另外三件事：加超时、只对合法 IP 发起查询（避免把任意
+// 字符串拼进 URL 路径）、限制响应体大小。
+func lookupCountryCode(agentID, ip string) {
+	if net.ParseIP(strings.TrimSpace(ip)) == nil {
+		return
+	}
+	resp, err := geoClient.Get("http://ip-api.com/json/" + url.PathEscape(ip) + "?fields=countryCode")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return
+	}
+	var res struct {
+		CountryCode string `json:"countryCode"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&res) != nil {
+		return
+	}
+	// 只接受标准的两位国家代码，避免把第三方返回的任意内容写进库里
+	cc := strings.ToUpper(strings.TrimSpace(res.CountryCode))
+	if len(cc) != 2 {
+		return
+	}
+	db.Model(&Node{}).Where("agent_id = ?", agentID).Update("country_code", cc)
+}
+
 // ================= 数据库模型 =================
 
 type User struct {
@@ -127,12 +189,16 @@ type Node struct {
 }
 
 type MonitorHistory struct {
-	ID        uint   `gorm:"primaryKey"`
-	AgentID   string `gorm:"index"`
-	Type      string `gorm:"index"`
-	Target    string
-	Value     float64
-	CreatedAt time.Time `gorm:"index"`
+	ID      uint   `gorm:"primaryKey"`
+	AgentID string `gorm:"index;index:idx_hist_lookup,priority:1"`
+	Type    string `gorm:"index;index:idx_hist_lookup,priority:2"`
+	Target  string
+	Value   float64
+	// 复合索引 (agent_id, type, created_at)：历史查询的固定形态是
+	// 「某节点 + 某类型 + 按时间倒序取 N 条」。只有单列索引时 SQLite
+	// 只能先用 agent_id 选出该节点的全部行再排序，历史表一大就很慢；
+	// 三个字段的复合索引可以让它直接走索引倒序扫描。
+	CreatedAt time.Time `gorm:"index;index:idx_hist_lookup,priority:3"`
 }
 
 // ================= 传输模型 =================
@@ -227,6 +293,14 @@ func installAgent(server, token, id string) {
 
 func installSystemd(binPath, server, token, id string) {
 	fmt.Println("-> 检测到 Systemd 系统")
+	// ExecStart 的每个参数都单独加引号：路径里出现空格（/opt/my monitor/monitor）
+	// 会让 systemd 把参数切错，服务起不来却只报 "No such file or directory"。
+	// 换行符必须在这里挡住 —— 它能直接往 unit 文件里插入新的指令行
+	//（例如 User=root / ExecStartPre=...），属于写文件层面的注入。
+	if err := rejectUnitInjection(server, token, id); err != nil {
+		fmt.Println("❌ 安装参数非法：", err)
+		return
+	}
 	serviceContent := fmt.Sprintf(`[Unit]
 Description=VPS Monitor Agent
 After=network.target
@@ -237,8 +311,11 @@ Restart=always
 RestartSec=5
 [Install]
 WantedBy=multi-user.target
-`, binPath, server, token, id)
-	ioutil.WriteFile("/etc/systemd/system/monitor.service", []byte(serviceContent), 0644)
+`, systemdQuote(binPath), systemdQuote(server), systemdQuote(token), systemdQuote(id))
+	if err := os.WriteFile("/etc/systemd/system/monitor.service", []byte(serviceContent), 0644); err != nil {
+		fmt.Println("❌ 写入 systemd 服务文件失败：", err)
+		return
+	}
 	exec.Command("systemctl", "daemon-reload").Run()
 	exec.Command("systemctl", "enable", "monitor").Run()
 	exec.Command("systemctl", "restart", "monitor").Run()
@@ -247,17 +324,56 @@ WantedBy=multi-user.target
 
 func installOpenRC(binPath, server, token, id string) {
 	fmt.Println("-> 检测到 Alpine (OpenRC) 系统")
+	if err := rejectUnitInjection(server, token, id); err != nil {
+		fmt.Println("❌ 安装参数非法：", err)
+		return
+	}
+	// OpenRC 的 command_args 由 shell 解析，因此用单引号包住每个值；
+	// 同样先挡掉换行与单引号，避免参数逃逸成新的一行配置。
 	scriptContent := fmt.Sprintf(`#!/sbin/openrc-run
 name="monitor"
 command="%s"
 command_args="-mode agent -server %s -token %s -id %s"
 command_background=true
 pidfile="/run/monitor.pid"
-`, binPath, server, token, id)
-	ioutil.WriteFile("/etc/init.d/monitor", []byte(scriptContent), 0755)
+`, shellQuote(binPath), shellQuote(server), shellQuote(token), shellQuote(id))
+	if err := os.WriteFile("/etc/init.d/monitor", []byte(scriptContent), 0755); err != nil {
+		fmt.Println("❌ 写入 OpenRC 服务脚本失败：", err)
+		return
+	}
 	exec.Command("rc-update", "add", "monitor").Run()
 	exec.Command("rc-service", "monitor", "restart").Run()
 	fmt.Println("✅ 安装成功! 服务已启动并设置开机自启。")
+}
+
+// rejectUnitInjection 拒绝会破坏服务配置文件的参数。
+//
+// -server / -token / -id 都会原样写进 systemd unit 或 OpenRC 脚本。
+// 其中 token 来自面板配置（管理员可自由填写），换行符能插入新的 unit 指令，
+// 单引号/双引号能在 OpenRC 的 command_args 里逃逸出来执行任意命令。
+// 这些值本来就只允许出现在 URL、主机名、十六进制 ID 与 Token 里，
+// 直接把可疑字符拒掉，比事后转义更不容易出错。
+func rejectUnitInjection(values ...string) error {
+	for _, v := range values {
+		if strings.ContainsAny(v, "\r\n") {
+			return errors.New("参数中不能包含换行符")
+		}
+		if strings.ContainsAny(v, `"'`) {
+			return errors.New("参数中不能包含引号")
+		}
+		if strings.Contains(v, "\\") {
+			return errors.New("参数中不能包含反斜杠")
+		}
+	}
+	return nil
+}
+
+// systemdQuote 按 systemd 的规则给 ExecStart 参数加引号。
+// systemd 只认双引号，内部的反斜杠与双引号需要转义。
+func systemdQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
 }
 
 // ================= 安装命令生成 =================
@@ -280,6 +396,71 @@ func installCommand(serverURL, token, id string) string {
 	).Replace(installCmdTmpl)
 }
 
+// ================= 安全响应头 =================
+//
+// 面板把 HTML 内联在单文件二进制里，页面自带 <script> 与 onclick 处理器，
+// 因此 CSP 无法彻底去掉 script-src 'unsafe-inline'（那是另一轮改造）。
+// 但下面几条依然有实效，尤其是 connect-src：
+//
+//   - frame-ancestors 'none' / X-Frame-Options：挡住点击劫持。管理员在别的
+//     页面里被套一层透明 iframe，「改更新源」这种按钮点一下就生效。
+//   - connect-src 'self'：即使真的被注入脚本，fetch/XHR 也发不出去 ——
+//     令牌外带这条最关键的路径被切断。
+//   - form-action 'self' / base-uri 'none'：挡住表单外发与 <base> 劫持。
+//   - nosniff / Referrer-Policy：常规硬化。
+const contentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
+	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+	"font-src 'self' data: https://fonts.gstatic.com; " +
+	"img-src 'self' data: https:; " +
+	"connect-src 'self'; " +
+	"object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+
+func securityHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		h := c.Writer.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", contentSecurityPolicy)
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+		// HSTS 只在确认走 HTTPS 时才下发。
+		// 面板常以 http://IP:8080 直连，对 HTTP 站点发 HSTS 会把浏览器
+		// 永久锁在打不开的 https:// 上（除非用户手动清 HSTS 缓存）。
+		if c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		c.Next()
+	}
+}
+
+// loadSessionSecret 返回会话签名密钥，并保证它在重启之间保持不变。
+//
+// 早期实现是「每次启动随机生成 32 字节」：进程一重启，所有设备上的 Cookie
+// 立刻失效。systemd 配的是 Restart=always，于是一次崩溃重启就会静默登出
+// 全部管理员 —— 而且日志里没有任何线索。
+//
+// 现在落库到 AppConfig：密钥仍由 crypto/rand 生成（不写死在代码里），
+// 只是被持久化下来。SESSION_KEY 环境变量优先级最高，便于多实例共享同一密钥。
+func loadSessionSecret() []byte {
+	if envKey := strings.TrimSpace(os.Getenv("SESSION_KEY")); envKey != "" {
+		return []byte(envKey)
+	}
+	var cfg AppConfig
+	if err := db.Where("key = ?", "session_secret").First(&cfg).Error; err == nil && len(cfg.Value) >= 32 {
+		return []byte(cfg.Value)
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		// 熵源坏了就没有安全可言，直接拒绝启动而不是用可预测的密钥跑起来
+		log.Fatalf("无法生成会话密钥（系统熵源不可用）: %v", err)
+	}
+	secret := hex.EncodeToString(b)
+	saveConfig("session_secret", secret)
+	return []byte(secret)
+}
+
 // ================= 服务端 =================
 
 func runServer(port string) {
@@ -297,35 +478,50 @@ func runServer(port string) {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+	r.Use(securityHeaders())
 
-	// 安全增强：不信任任何代理头。
-	// gin 默认把 X-Forwarded-For 当作可信来源，于是 ClientIP() 可被请求方随意伪造 ——
-	// 对「登录限流」这种按 IP 计数的防护来说，等于形同虚设。
-	// 这里显式关掉信任代理，ClientIP()/RemoteIP() 一律回落到真实 TCP 对端。
+	// 安全增强：不让 gin 自己决定采信哪个转发头。
+	//
+	// gin 默认把 X-Forwarded-For 当作可信来源，ClientIP() 因此可被请求方
+	// 随意伪造 —— 对「登录限流」这种按 IP 计数的防护来说等于形同虚设。
+	// 这里关掉 gin 的内建逻辑，改由 clientIP() 统一裁决：
+	// 对端不在 TRUSTED_PROXIES 内就完全忽略转发头，在列表内才从右往左
+	// 解析出第一个非可信地址（Nginx 的 $proxy_add_x_forwarded_for 是
+	// 追加语义，真实地址在右边，取最左值等于把伪造权还给攻击者）。
 	_ = r.SetTrustedProxies(nil)
 
 	// PWA：manifest / Service Worker / 运行时绘制的图标 / 离线页
 	registerPWARoutes(r)
 
-	// 安全增强: 随机生成 Session Key
-	var sessionKey []byte
-	if envKey := os.Getenv("SESSION_KEY"); envKey != "" {
-		sessionKey = []byte(envKey)
-	} else {
-		sessionKey = make([]byte, 32)
-		rand.Read(sessionKey)
-	}
+	// 会话签名密钥：持久化到数据库，重启不再把所有人踢下线。
+	sessionKey := loadSessionSecret()
 	store := cookie.NewStore(sessionKey)
-	// 安全增强: Cookie 属性设置
-	store.Options(sessions.Options{Path: "/", MaxAge: 3600 * 24, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	// Cookie 属性：HttpOnly 挡 XSS 读 Cookie，SameSite=Strict 挡 CSRF。
+	// Secure 默认不开 —— 面板通常以 http://IP:8080 直连，强行开 Secure
+	// 会让浏览器直接丢弃 Cookie，表现为「登录后立刻又回到登录页」。
+	// 反向代理终止 TLS 的部署可设 COOKIE_SECURE=1 打开。
+	store.Options(sessions.Options{
+		Path:     "/",
+		MaxAge:   3600 * 24,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   os.Getenv("COOKIE_SECURE") == "1",
+	})
 	r.Use(sessions.Sessions("mysession", store))
 
 	// 下载程序本体：按 ?arch= 分发对应架构的 Agent 二进制。
 	// 不带 arch 参数时保持旧行为（分发面板自身二进制）。
+	//
+	// 这里用 selfPath() 而不是相对路径 "./monitor"：
+	//   - 相对路径取决于进程的当前工作目录。systemd unit 里若没写
+	//     WorkingDirectory（或写成了别处），这里会直接 404；
+	//   - 自更新替换的是「正在运行的二进制」（selfPath()），两者一旦
+	//     不是同一个文件，就会出现「面板已升级、下发的还是旧版」。
 	r.GET("/api/download", func(c *gin.Context) {
 		raw := c.Query("arch")
+		self := selfPath()
 		if raw == "" {
-			c.File("./monitor")
+			c.File(self)
 			return
 		}
 		arch := normalizeArch(raw)
@@ -344,7 +540,7 @@ func runServer(port string) {
 		// "cannot execute binary file"，比下载失败更难排查。
 		if arch == runtime.GOARCH {
 			c.Header("X-Binary-Arch", arch)
-			c.File("./monitor")
+			c.File(self)
 			return
 		}
 		c.String(404, "面板尚未缓存 %s 架构的 Agent 二进制（面板自身为 %s）。\n"+
@@ -440,7 +636,11 @@ func runServer(port string) {
 			if cnt > 0 {
 				return errSetupClosed
 			}
-			return tx.Create(&User{Username: u, Password: hashPwd(p)}).Error
+			hashed, err := hashPwd(p)
+			if err != nil {
+				return err
+			}
+			return tx.Create(&User{Username: u, Password: hashed}).Error
 		})
 		if err != nil {
 			// 已初始化（或并发抢跑失败）一律回到登录页，不再泄露任何信息
@@ -498,8 +698,13 @@ func runServer(port string) {
 		if db.Where("username=?", u).First(&user).Error == nil {
 			if ok, needUpgrade := checkPwdUpgrade(p, user.Password); ok {
 				if needUpgrade {
-					db.Model(&User{}).Where("id = ?", user.ID).
-						Update("password", hashPwd(p))
+					// 升级失败不阻断登录：用户凭据是对的，哈希格式换不换是内部事。
+					// 记一条日志，下次登录会再试一次。
+					if upgraded, err := hashPwd(p); err == nil {
+						db.Model(&User{}).Where("id = ?", user.ID).Update("password", upgraded)
+					} else {
+						log.Printf("[auth] 密码哈希升级失败（不影响本次登录）: %v", err)
+					}
 				}
 				loginSucceeded(c)
 				s := sessions.Default(c)
@@ -538,102 +743,141 @@ func runServer(port string) {
 			t := globalConfig.Token
 			targets := globalConfig.PingTargets
 			globalConfig.RUnlock()
-			// 安全增强: 优先从 Header 获取 Token
+
+			// 先限长再读 body。正常心跳报文只有几 KB，256KB 已经非常宽松。
+			// 不加这个上限的话，任何持有 Token 的客户端都能发一个几百 MB 的
+			// JSON，直接把面板的内存吃光（gin 默认不限制请求体大小）。
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxReportBytes)
+
+			// 用恒定时间比较。原实现的 `!=` 会在第一个不同的字节处提前返回，
+			// 理论上可以靠响应耗时逐字节把 Token 试出来。
 			clientToken := c.GetHeader("Authorization")
 			if clientToken == "" {
-				clientToken = c.Query("token")
-			} // 兼容旧方式
-
-			if clientToken != t {
+				clientToken = c.Query("token") // 兼容旧方式
+			}
+			if subtle.ConstantTimeCompare([]byte(clientToken), []byte(t)) != 1 {
 				c.AbortWithStatus(401)
 				return
 			}
 
 			var s SystemStatus
-			if err := c.ShouldBindJSON(&s); err == nil {
-				// 先收敛不可信字段，再进入缓存 / 数据库 / 界面
-				sanitizeReport(&s)
-				s.LastUpdate = time.Now()
-				if s.IP == "" {
-					s.IP = c.ClientIP()
-				}
+			if err := c.ShouldBindJSON(&s); err != nil {
+				// 原实现在绑定失败时不写任何响应，gin 会返回 200 + 空 body。
+				// 客户端据此认为「上报成功」，实际一条都没落库 ——
+				// 这类静默失败在排查节点异常时极难定位。
+				c.JSON(400, gin.H{"error": "报文格式不正确"})
+				return
+			}
 
-				var node Node
-				db.Clauses(clause.OnConflict{DoNothing: true}).Create(&Node{AgentID: s.AgentID})
-				db.First(&node, "agent_id = ?", s.AgentID)
+			// 先收敛不可信字段，再进入缓存 / 数据库 / 界面
+			sanitizeReport(&s)
+			if s.AgentID == "" {
+				c.JSON(400, gin.H{"error": "缺少 agent_id"})
+				return
+			}
+			s.LastUpdate = time.Now()
+			if s.IP == "" {
+				// 仅作兜底：正常 Agent 会自己上报 IP。这里同样走 clientIP，
+				// 使得「面板挂在反代后」时落库的也是真实来源而非代理地址。
+				s.IP = clientIP(c)
+			}
 
-				if node.Denied {
-					c.JSON(200, AgentResponse{Status: "stop"})
+			var node Node
+			err := db.First(&node, "agent_id = ?", s.AgentID).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// 自动注册：节点记录可能被误删，允许 Agent 自愈重建。
+				// 但必须有个上限 —— 否则任何持有 Token 的人都能无限灌节点记录，
+				// 把库撑大、把面板列表撑爆。
+				var total int64
+				db.Model(&Node{}).Count(&total)
+				if total >= maxAutoRegisterNodes {
+					c.JSON(429, gin.H{"error": "节点数量已达上限，请先在面板中清理"})
 					return
 				}
-
-				if node.CountryCode == "" {
-					go func(aid, ip string) {
-						resp, err := http.Get("http://ip-api.com/json/" + ip)
-						if err == nil {
-							defer resp.Body.Close()
-							var res struct {
-								CountryCode string `json:"countryCode"`
-							}
-							if json.NewDecoder(resp.Body).Decode(&res) == nil && res.CountryCode != "" {
-								db.Model(&Node{}).Where("agent_id=?", aid).Update("country_code", res.CountryCode)
-							}
-						}
-					}(s.AgentID, s.IP)
+				db.Clauses(clause.OnConflict{DoNothing: true}).Create(&Node{AgentID: s.AgentID})
+				if err := db.First(&node, "agent_id = ?", s.AgentID).Error; err != nil {
+					c.JSON(500, gin.H{"error": "创建节点记录失败"})
+					return
 				}
-
-				// [新增] 同步客户端架构 / 版本，并处理更新回执
-				if s.Arch != "" {
-					node.Arch = normalizeArch(s.Arch)
-				}
-				if s.Version != "" {
-					node.AgentVersion = s.Version
-				}
-				nodeUpdates := map[string]interface{}{}
-				if s.Arch != "" {
-					nodeUpdates["arch"] = normalizeArch(s.Arch)
-				}
-				if s.Version != "" {
-					nodeUpdates["agent_version"] = s.Version
-				}
-				if node.PendingUpdate != "" && s.Version == node.PendingUpdate {
-					nodeUpdates["pending_update"] = ""
-					node.PendingUpdate = ""
-				}
-				if len(nodeUpdates) > 0 {
-					db.Model(&Node{}).Where("agent_id = ?", s.AgentID).Updates(nodeUpdates)
-				}
-
-				for target, delay := range s.PingResults {
-					if delay > 0 {
-						db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "ping", Target: target, Value: float64(delay), CreatedAt: time.Now()})
-					}
-				}
-				if time.Now().Second() < 5 {
-					db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "cpu", Value: s.CPUUsage, CreatedAt: time.Now()})
-					db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "mem", Value: s.MemUsedPercent, CreatedAt: time.Now()})
-					db.Create(&MonitorHistory{AgentID: s.AgentID, Type: "disk", Value: s.DiskUsedPercent, CreatedAt: time.Now()})
-				}
-
-				s.Name = node.Name
-				s.HideID = node.HideID
-				s.SortOrder = node.SortOrder
-				s.CountryCode = node.CountryCode
-				s.PingTargets = targets
-				s.Arch = node.Arch
-				s.PendingUpdate = ""
-
-				// [新增] 如需更新，随心跳下发自更新指令
-				upd := buildUpdateCommand(node)
-				if upd != nil {
-					s.PendingUpdate = upd.Version
-				}
-
-				cacheMutex.Lock()
-				statusCache[s.AgentID] = s
-				cacheMutex.Unlock()
-				c.JSON(200, AgentResponse{Status: "ok", PingTargets: targets, Update: upd})
+			} else if err != nil {
+				c.JSON(500, gin.H{"error": "读取节点记录失败"})
+				return
 			}
+
+			if node.Denied {
+				c.JSON(200, AgentResponse{Status: "stop"})
+				return
+			}
+
+			if node.CountryCode == "" && s.IP != "" {
+				go lookupCountryCode(s.AgentID, s.IP)
+			}
+
+			// [新增] 同步客户端架构 / 版本，并处理更新回执
+			if s.Arch != "" {
+				node.Arch = normalizeArch(s.Arch)
+			}
+			if s.Version != "" {
+				node.AgentVersion = s.Version
+			}
+			nodeUpdates := map[string]interface{}{}
+			if s.Arch != "" {
+				nodeUpdates["arch"] = normalizeArch(s.Arch)
+			}
+			if s.Version != "" {
+				nodeUpdates["agent_version"] = s.Version
+			}
+			if node.PendingUpdate != "" && s.Version == node.PendingUpdate {
+				nodeUpdates["pending_update"] = ""
+				node.PendingUpdate = ""
+			}
+			if len(nodeUpdates) > 0 {
+				db.Model(&Node{}).Where("agent_id = ?", s.AgentID).Updates(nodeUpdates)
+			}
+
+			// 历史采样一次批量写入。原实现是「每个 ping 目标一条 db.Create」，
+			// 每个目标都是一次独立事务 —— 10 个目标 × 1000 节点 = 每 5 秒
+			// 上万次事务提交，SQLite 的 WAL 会被这串 fsync 拖垮。
+			now := time.Now()
+			rows := make([]MonitorHistory, 0, len(s.PingResults)+3)
+			for target, delay := range s.PingResults {
+				if delay <= 0 || delay > maxPingDelayMs {
+					continue
+				}
+				rows = append(rows, MonitorHistory{
+					AgentID: s.AgentID, Type: "ping",
+					Target: cleanField(target, 128), Value: float64(delay), CreatedAt: now,
+				})
+			}
+			if now.Second() < 5 {
+				rows = append(rows,
+					MonitorHistory{AgentID: s.AgentID, Type: "cpu", Value: s.CPUUsage, CreatedAt: now},
+					MonitorHistory{AgentID: s.AgentID, Type: "mem", Value: s.MemUsedPercent, CreatedAt: now},
+					MonitorHistory{AgentID: s.AgentID, Type: "disk", Value: s.DiskUsedPercent, CreatedAt: now},
+				)
+			}
+			if len(rows) > 0 {
+				db.CreateInBatches(&rows, 50)
+			}
+
+			s.Name = node.Name
+			s.HideID = node.HideID
+			s.SortOrder = node.SortOrder
+			s.CountryCode = node.CountryCode
+			s.PingTargets = targets
+			s.Arch = node.Arch
+			s.PendingUpdate = ""
+
+			// [新增] 如需更新，随心跳下发自更新指令
+			upd := buildUpdateCommand(node)
+			if upd != nil {
+				s.PendingUpdate = upd.Version
+			}
+
+			cacheMutex.Lock()
+			statusCache[s.AgentID] = s
+			cacheMutex.Unlock()
+			c.JSON(200, AgentResponse{Status: "ok", PingTargets: targets, Update: upd})
 		})
 
 		api.GET("/stats", func(c *gin.Context) {
@@ -799,12 +1043,14 @@ func runServer(port string) {
 					return
 				}
 
-				b := make([]byte, 3)
-				rand.Read(b)
-				id := hex.EncodeToString(b)
+				id, err := randomAgentID()
+				if err != nil {
+					log.Printf("[node] 生成节点 ID 失败: %v", err)
+					c.JSON(500, gin.H{"status": "error"})
+					return
+				}
 
 				db.Create(&Node{AgentID: id, Name: name})
-
 				globalConfig.RLock()
 				serverURL := globalConfig.ServerURL
 				if serverURL == "" {
@@ -829,11 +1075,12 @@ func runServer(port string) {
 			})
 
 			auth.POST("/settings/token", func(c *gin.Context) {
-				t := c.PostForm("token")
-				if len(t) < 8 {
-					// 通信 Token 是 Agent 身份的唯一凭据，弱 Token 等于把
-					// /api/report 直接开放给猜得到的人
-					c.String(400, "Token 至少需要 8 位字符")
+				t := strings.TrimSpace(c.PostForm("token"))
+				// Token 会被拼进 Agent 安装命令（单引号包裹）、写进 systemd unit
+				// 与 OpenRC 脚本。允许引号 / 分号 / 换行，等于把这三处都变成
+				// 任意命令与配置注入的载体。直接限定字符集最不容易出错。
+				if !validToken(t) {
+					c.String(400, "Token 需为 8~64 位的字母、数字、下划线或短横线")
 					return
 				}
 				saveConfig("token", t)
@@ -1085,8 +1332,36 @@ func runServer(port string) {
 		}
 	}
 
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: r,
+		// 显式设置超时。gin 的 r.Run() 内部走 http.ListenAndServe，
+		// 三个超时全是 0（不限制）：一条慢速连接（Slowloris）就能长期
+		// 占住一个连接和一个 goroutine，几十条就能把面板拖到不响应。
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		// 写超时给得宽一些：数据库备份（VACUUM INTO）与导出是同步执行的长任务
+		WriteTimeout:   180 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 16,
+	}
+
+	// 优雅退出：收到 SIGINT/SIGTERM 后停止接受新连接，并给在途请求收尾时间。
+	// 自更新脚本会 sleep 3 秒再替换二进制，这个窗口足够旧进程释放端口，
+	// 避免新旧实例抢监听（表现为更新完成后短暂 502）。
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		<-ch
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
 	fmt.Printf(">> http://localhost:%s\n", port)
-	r.Run(":" + port)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("HTTP 服务异常退出: %v", err)
+	}
 }
 
 // randomToken 生成一个 24 位十六进制随机串，用于首次运行时的 Agent 通信 Token。
@@ -1101,6 +1376,32 @@ func randomToken() string {
 		return fmt.Sprintf("tok-%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
+}
+
+// tokenPattern 约束 Agent 通信 Token 的字符集。
+//
+// 这个值会被拼进三段不同的上下文：Agent 安装命令（shell 单引号）、
+// systemd unit（ExecStart 参数）、OpenRC 脚本（command_args）。
+// 与其在每个拼接点各写一套转义，不如把字符集收窄到「放哪儿都安全」。
+// 自动生成的 Token 是十六进制，天然满足。
+var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
+
+func validToken(s string) bool { return tokenPattern.MatchString(s) }
+
+// randomAgentID 生成节点 ID：8 字节随机数的十六进制表示（16 个字符）。
+//
+// 原实现只有 3 字节（6 个字符，约 1677 万种）。两个后果：
+//   - AgentID 是 nodes 表主键，1000 个节点时的生日碰撞概率就已到 3%。
+//     一旦撞上，两台机器会被合并成同一条记录，表现为「刚装好的节点顶着
+//     别人的数据」，排查时几乎想不到是 ID 重复。
+//   - AgentID 同时是 /api/stats 与 /api/history/* 的公开查询键，
+//     熵太低等于允许匿名访问者把全部节点枚举出来。
+func randomAgentID() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func randomEpoch() string {
@@ -1303,6 +1604,10 @@ func dashboardHandler(c *gin.Context) {
 		// === 版本更新 ===
 		"Version": displayVersion(), "UpdateRepo": repo, "UpdateProxy": proxy,
 		"RestartCmd": rCmd, "AgentBundleVersion": bundle,
+		// 在线判定窗口由后端下发，前端不再自己硬编码一个魔数。
+		// 两边各写一个值时（曾经是后端 30s / 前端 25s），出现
+		// 「面板显示在线、告警已判离线」这种自相矛盾的状态只是时间问题。
+		"OnlineWindow": int(onlineWindow.Seconds()),
 	})
 }
 
@@ -1345,28 +1650,49 @@ func authMiddleware() gin.HandlerFunc {
 // 登录体验几乎无感，但把离线爆破的成本抬高了几个数量级。
 const bcryptCost = 12
 
-// 安全增强: 密码哈希（bcrypt）
-func hashPwd(password string) string {
-	h, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
-	if err != nil {
-		// 理论上不会失败；真失败时退回旧格式，保证功能不中断
-		salt := make([]byte, 16)
-		rand.Read(salt)
-		sum := sha256.Sum256(append(salt, []byte(password)...))
-		return hex.EncodeToString(salt) + "$" + hex.EncodeToString(sum[:])
+// bcryptInput 把口令压成 bcrypt 能接受的输入。
+//
+// bcrypt 的输入上限是 72 字节，超长会直接返回错误。原实现在出错时
+// 「静默退回 SHA-256」，于是只要把密码设得足够长（passwordWeakness 允许
+// 到 128 字符），拿到的就是一个抗爆破能力差了几个数量级的旧式哈希 ——
+// 而且界面上完全看不出来。
+//
+// 现在改为：超过 72 字节的口令先做一次 SHA-256 再交给 bcrypt，
+// 输入长度恒为 64 字节（hex），永远落在上限内，口令本身的熵没有损失。
+//
+// 为什么这样改不会锁死存量账号：分支判据是「口令的字节长度」而不是
+// 「哈希的形态」，同一个口令在设置与校验时必然走同一分支。因此
+//   - 旧库里 bcrypt(raw) 的哈希，只要口令 ≤72 字节就仍然匹配；
+//   - 旧库里超长口令本来就走 salt$sha256 分支（当时 bcrypt 直接报错），
+//     根本不存在「bcrypt(超长明文)」这种历史哈希。
+func bcryptInput(password string) []byte {
+	if len(password) <= 72 {
+		return []byte(password)
 	}
-	return string(h)
+	sum := sha256.Sum256([]byte(password))
+	return []byte(hex.EncodeToString(sum[:]))
 }
 
-// checkPwd 校验密码；第二个返回值表示「该哈希是旧格式，应升级」
+// hashPwd 生成口令哈希。返回 error 而不是降级：
+// 「密码学子系统异常」时悄悄换成弱哈希，比直接报错危险得多。
+func hashPwd(password string) (string, error) {
+	h, err := bcrypt.GenerateFromPassword(bcryptInput(password), bcryptCost)
+	if err != nil {
+		return "", fmt.Errorf("生成密码哈希失败: %w", err)
+	}
+	return string(h), nil
+}
+
+// checkPwd 校验密码
 func checkPwd(password, stored string) bool {
 	ok, _ := checkPwdUpgrade(password, stored)
 	return ok
 }
 
+// checkPwdUpgrade 校验密码；第二个返回值表示「该哈希是旧格式，应升级」
 func checkPwdUpgrade(password, stored string) (bool, bool) {
 	if strings.HasPrefix(stored, "$2a$") || strings.HasPrefix(stored, "$2b$") || strings.HasPrefix(stored, "$2y$") {
-		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(password)) == nil, false
+		return bcrypt.CompareHashAndPassword([]byte(stored), bcryptInput(password)) == nil, false
 	}
 	// 旧格式：salt$sha256
 	parts := strings.Split(stored, "$")
@@ -1422,6 +1748,33 @@ func sanitizeReport(s *SystemStatus) {
 	}
 	if s.DiskTotal > maxSaneBytes {
 		s.DiskTotal = 0
+	}
+
+	// ping 结果是唯一会被「逐条写进数据库」的字段，必须限幅：
+	// 不限条数时，一次心跳就能灌进上万个目标，每 5 秒往
+	// monitor_histories 里写几万行 —— 磁盘和清理任务都会被打爆。
+	// 同时把键名收敛一遍：它会进数据库、进图表图例。
+	//
+	// 顺序很重要：先清洗再截断。反过来的话，两个超长键被截断到同一
+	// 前缀后会合并成一条，实际保留下来的条数就少于上限了。
+	if len(s.PingResults) > 0 {
+		cleaned := make(map[string]int64, len(s.PingResults))
+		for k, v := range s.PingResults {
+			cleaned[cleanField(k, 128)] = v
+		}
+		if len(cleaned) > maxPingTargetsPerReport {
+			trimmed := make(map[string]int64, maxPingTargetsPerReport)
+			n := 0
+			for k, v := range cleaned {
+				trimmed[k] = v
+				n++
+				if n >= maxPingTargetsPerReport {
+					break
+				}
+			}
+			cleaned = trimmed
+		}
+		s.PingResults = cleaned
 	}
 }
 
@@ -1555,7 +1908,10 @@ func runAgent(server, token, id string) {
 		resp, err := client.Do(req)
 
 		if err == nil {
-			body, _ := ioutil.ReadAll(resp.Body)
+			// 限长读取：面板的响应正常只有几百字节，1MB 已是极宽松的上限。
+			// 不限长时，一个被劫持或被伪造的面板地址可以返回一个巨大的
+			// body，把 Agent 的内存吃光 —— 而 Agent 通常跑在资源紧张的小机上。
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			var serverResp AgentResponse
 			if json.Unmarshal(body, &serverResp) == nil {
