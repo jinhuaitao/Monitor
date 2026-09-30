@@ -927,6 +927,29 @@ table.tbl td.mono{font-family:'Menlo',monospace;font-size:11.5px;white-space:now
             命令内置 <b>uname -m</b> 探测，会<b>自动识别 amd64 / arm64</b> 并拉取对应架构的客户端，无需手动选择。
           </div>
           <div class="form-hint" id="installArchHint" style="margin-top:10px"></div>
+
+          <div class="sub-sec">
+            <h5>🌍 归属地定位</h5>
+            <div class="row">
+              <button class="btn-outline btn-sm" onclick="loadGeoConfig()">刷新</button>
+              <button class="btn-outline btn-sm" onclick="refreshGeo('')">重新定位全部节点</button>
+            </div>
+          </div>
+          <div class="card-soft">
+            <div class="form-hint" style="margin-top:0">
+              节点卡片上的国旗来自 IP 归属地查询。如果面板前面挂了 <b>Nginx / CDN / 宝塔</b>，
+              面板看到的来源地址会是代理地址，所有节点就会被定位成同一个国家 ——
+              这时把代理的地址段填在下面，面板才会去读 <code>X-Forwarded-For</code>。<br>
+              留空 = 面板直接对外，只认 TCP 对端（更安全）。<b>登录限流不受此项影响</b>，
+              它始终按真实对端地址计数，不会因为这里放开而变得可被伪造。
+            </div>
+            <div class="form-group" style="margin-bottom:10px">
+              <label class="form-label">可信代理网段（逗号分隔）</label>
+              <input type="text" id="geoProxies" class="input-text" placeholder="例如: 127.0.0.1, 172.17.0.0/16">
+            </div>
+            <div class="form-hint" id="geoStatus" style="margin-bottom:12px">正在读取…</div>
+            <button class="btn-primary" onclick="saveGeoConfig()">保存并应用</button>
+          </div>
         </div>
 
         <!-- 告警设置 -->
@@ -1262,8 +1285,11 @@ function escapeHtml(t){
   if(t===null||t===undefined) return '';
   return String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;");
 }
+/* 归属地旗帜。cc 为空时返回一个中性的定位标记，而不是白旗 ——
+   白旗看上去像"某个国家的旗子"，会把「还没定位到」误读成「定位错了」。
+   想看具体是哪种情况，看节点详情里的「归属地」一项。 */
 function getFlagEmoji(cc){
-  if(!cc||cc.length!==2) return '🏳️';
+  if(!cc||cc.length!==2) return '📍';
   return String.fromCodePoint(...cc.toUpperCase().split('').map(function(c){return 127397+c.charCodeAt()}));
 }
 function fmtBytes(b){
@@ -1629,7 +1655,7 @@ function switchTab(t){
   if(t==='account') loadSecurity();
   if(t==='audit') loadAudit(1);
   if(t==='update' && !latestVersion) checkUpdate(true);
-  if(t==='install') refreshInstallInfo();
+  if(t==='install'){ refreshInstallInfo(); loadGeoConfig(); }
 }
 /* 提示面板当前缓存了哪些架构的客户端二进制：
    arm64 没缓存时，arm64 机器执行安装命令会拿到 404，提前告知避免踩坑 */
@@ -1642,6 +1668,59 @@ function refreshInstallInfo(){
       ? '📦 面板已缓存客户端二进制: <b>'+a.join(' / ')+'</b>'
       : '⚠️ 面板尚未缓存任何客户端二进制。若目标机器是 <b>arm64</b> 且面板自身为 amd64，安装会失败 —— 请先到「版本更新 → 同步最新版本」。';
   }).catch(function(){ el.innerHTML=''; });
+}
+/* 定位配置。这里把「面板当前解析到的来源地址」直接显示出来很关键 ——
+   面板挂在反代后面时，这一项会显示成 127.0.0.1 或网关地址，
+   一眼就能看出所有节点为什么会被定位成同一个国家。 */
+function loadGeoConfig(){
+  if(!isAdmin) return;
+  fetch('/api/settings/geo/config').then(function(r){return r.json()}).then(function(d){
+    var el=document.getElementById('geoProxies');
+    // 不要覆盖用户正在输入的内容
+    if(el&&document.activeElement!==el) el.value=d.trusted_proxies||'';
+    var st=document.getElementById('geoStatus');
+    if(!st) return;
+    var src=d.source_ip||'—', rem=d.remote_ip||'—';
+    var note=(src===rem)?'（当前使用 TCP 对端地址）':'（已从 X-Forwarded-For 解析）';
+    st.innerHTML='面板当前解析到的来源地址：<b>'+escapeHtml(src)+'</b> '+note+
+      ' · 已缓存 '+d.cached+' 个 IP 的定位结果';
+  }).catch(function(){});
+}
+function saveGeoConfig(){
+  var el=document.getElementById('geoProxies');
+  var v=el?el.value.trim():'';
+  fetch('/api/settings/geo/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'trusted_proxies='+encodeURIComponent(v)})
+  .then(function(r){
+    // 网段格式错误时服务端返回 400 并带上原因，必须显示出来，
+    // 否则使用者会以为保存成功了，实际定位仍然全错
+    if(!r.ok) return r.text().then(function(t){throw new Error(t||'保存失败');});
+    toast('定位配置已保存','ok'); loadGeoConfig();
+  })
+  .catch(function(e){ toast('❌ '+(e.message||'保存失败'),'err'); });
+}
+function refreshGeo(id){
+  if(!confirm('重新定位'+(id?'该节点':'全部节点')+'？\n\n会清掉已有的定位缓存，下一轮心跳重新查询。')) return;
+  fetch('/api/settings/geo/refresh',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'id='+encodeURIComponent(id||'')})
+  .then(function(r){return r.json()}).then(function(d){
+    toast('已重置 '+d.count+' 个节点的定位缓存','ok');
+    loadGeoConfig(); updateStats();
+  }).catch(function(){ toast('操作失败','err'); });
+}
+/* 手动指定国家。共享机房 IP、代理出口这类自动定位确实不准的情况，
+   这是唯一的纠正手段。留空即恢复自动定位。 */
+function setNodeGeo(id){
+  var cur=(statsData[id]&&statsData[id].country_code)||'';
+  var v=prompt('手动指定该节点的国家码（两位字母，如 HK / JP / US）\n留空表示恢复自动定位：',cur);
+  if(v===null) return;
+  fetch('/api/settings/geo/set',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'id='+encodeURIComponent(id)+'&code='+encodeURIComponent(v.trim())})
+  .then(function(r){
+    if(!r.ok) return r.text().then(function(t){throw new Error(t||'设置失败');});
+    toast('归属地已更新','ok'); updateStats();
+  })
+  .catch(function(e){ toast('❌ '+(e.message||'设置失败'),'err'); });
 }
 function openSettings(){
   document.getElementById('settingsModal').classList.add('open');
@@ -1823,6 +1902,7 @@ function loadNodeList(){
         '<input type="text" class="input-text" style="width:120px;padding:7px" value="'+escapeHtml(s.name||'')+'" placeholder="设置别名" id="n-'+id+'">'+
         '<input type="text" class="input-text" style="width:96px;padding:7px" value="'+escapeHtml(s.group||'')+'" placeholder="分组" id="g-'+id+'">'+
         '<button class="btn-primary btn-sm" onclick="saveNode(\''+id+'\')">保存</button>'+
+        '<button class="btn-outline btn-sm" onclick="setNodeGeo(\''+id+'\')" title="手动指定国家（自动定位不准时用）">🌍</button>'+
         '<button class="btn-outline btn-sm" onclick="copyInstallCmd(\''+id+'\')" title="复制安装命令（自动识别 amd64 / arm64）">📋</button>'+
         '<button class="btn-del" onclick="deleteNode(\''+id+'\')" title="删除节点">🗑️</button>'+
       '</div></div>';
@@ -2340,6 +2420,7 @@ var actionNames={
   alert_test:'测试告警',alert_history_clear:'清理告警历史',alert_ack:'确认告警',
   update_server:'面板自更新',agent_sync:'同步客户端',agent_push:'下发客户端更新',agent_push_batch:'批量下发更新',
   update_source:'修改更新源',
+  geo_config:'定位配置',geo_refresh:'重新定位',geo_set:'指定归属地',
   data_cleanup:'清理数据',data_export:'导出数据',db_backup:'数据库备份',retention_save:'保存保留策略',
   audit_clear:'清理操作日志'
 };
@@ -2368,6 +2449,9 @@ function openNodeDetails(id){
     ['内存大小', capText(s.mem_total,s.mem_total*(s.mem_used_percent||0)/100)],
     ['硬盘大小', capText(s.disk_total,s.disk_total*(s.disk_used_percent||0)/100)],
     ['IP 地址', escapeHtml(s.ip||'—')],
+    // 区分「未定位」与「已定位但无国家」：前者是查询还没成功或地址不可用，
+    // 后者才是真的查不到国家，两种情况的处理方式完全不同
+    ['归属地', s.country_code?escapeHtml(s.country_code):'<span style="color:var(--text-mute)">未定位（点下方 🌍 可手动指定）</span>'],
     ['架构 / 版本', escapeHtml(s.arch||'—')+' · '+escapeHtml((s.version&&s.version!=='dev')?'v'+s.version:'dev')],
     ['持续运行', fmtUptime(s.uptime)],
     ['总下载 / 上传', '↓ '+fmtBytes(s.net_total_in)+'<br>↑ '+fmtBytes(s.net_total_out)]

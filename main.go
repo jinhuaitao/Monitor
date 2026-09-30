@@ -93,6 +93,10 @@ var (
 		AuditKeepDays    int
 		// === 会话版本：改密码后自增，旧 Cookie 立即失效 ===
 		SessionEpoch string
+		// === 归属地定位（详见 geo.go）===
+		// 可信反向代理网段，逗号分隔的 CIDR。留空表示面板直接对外，
+		// 来源地址一律取不可伪造的 TCP 对端。
+		TrustedProxies string
 	}
 )
 
@@ -126,6 +130,10 @@ type Node struct {
 	Group         string    `gorm:"default:''"`    // [新增] 分组，用于节点多时的归类与筛选
 	Maintenance   bool      `gorm:"default:false"` // [新增] 维护模式：期间不触发任何告警
 	AlertMuted    bool      `gorm:"default:false"` // [新增] 仅静音告警，但节点仍正常显示
+	// [新增] GeoIP 记录「当前 country_code 是基于哪个来源 IP 查出来的」。
+	// 有它才能在节点换 IP / 迁移机房时自动重新定位 —— 只看 CountryCode 是否为空的话，
+	// 一旦写进去就永远没有纠正机会。特殊值 "manual" 表示管理员手动指定、不再自动覆盖。
+	GeoIP string `gorm:"default:''"`
 }
 
 type MonitorHistory struct {
@@ -294,6 +302,8 @@ func runServer(port string) {
 
 	db.AutoMigrate(&User{}, &AppConfig{}, &Node{}, &MonitorHistory{}, &AuditLog{}, &AlertEvent{})
 	loadGlobalConfig()
+	// 可信代理网段要在任何请求进来之前解析好，否则首批心跳会按「无代理」处理
+	reloadTrustedProxies()
 	go monitorAlerts()
 	go cleanupMaintenance()
 
@@ -556,8 +566,10 @@ func runServer(port string) {
 				// 先收敛不可信字段，再进入缓存 / 数据库 / 界面
 				sanitizeReport(&s)
 				s.LastUpdate = time.Now()
+				// 展示与定位用的来源地址：优先信任 Agent 自己上报的，否则按可信代理
+				// 配置解析。注意与登录限流刻意分开 —— 那边必须用不可伪造的 RemoteIP。
 				if s.IP == "" {
-					s.IP = c.ClientIP()
+					s.IP = geoSourceIP(c)
 				}
 
 				var node Node
@@ -569,20 +581,13 @@ func runServer(port string) {
 					return
 				}
 
-				if node.CountryCode == "" {
-					go func(aid, ip string) {
-						resp, err := http.Get("http://ip-api.com/json/" + ip)
-						if err == nil {
-							defer resp.Body.Close()
-							var res struct {
-								CountryCode string `json:"countryCode"`
-							}
-							if json.NewDecoder(resp.Body).Decode(&res) == nil && res.CountryCode != "" {
-								db.Model(&Node{}).Where("agent_id=?", aid).Update("country_code", res.CountryCode)
-							}
-						}
-					}(s.AgentID, s.IP)
-				}
+				// 归属地：先用内存缓存里的已知结果同步填一次（不产生网络请求，
+				// 界面立刻就是对的），未命中或来源 IP 变了才异步补查。
+				//
+				// 这里刻意不再用「CountryCode 为空」当唯一条件 —— 那个条件让首次
+				// 查错的结果永久固定，节点换 IP 也不会纠正。
+				s.CountryCode = geoCachedCountry(s.IP, node.CountryCode)
+				go syncNodeCountry(s.AgentID, s.IP, node.CountryCode, node.GeoIP)
 
 				// [新增] 同步客户端架构 / 版本，并处理更新回执
 				if s.Arch != "" {
@@ -620,7 +625,8 @@ func runServer(port string) {
 				s.Name = node.Name
 				s.HideID = node.HideID
 				s.SortOrder = node.SortOrder
-				s.CountryCode = node.CountryCode
+				// 注意：这里不要再回填 node.CountryCode。上面已经用内存缓存里的
+				// 最新定位结果填过 s.CountryCode，回填会把新值盖回数据库里的旧值。
 				s.PingTargets = targets
 				s.Arch = node.Arch
 				s.PendingUpdate = ""
@@ -1084,6 +1090,82 @@ func runServer(port string) {
 					fmt.Sprintf("更新源变更为 %s（镜像：%s）", repo, proxy), true)
 				c.Status(200)
 			})
+
+			// ================= 归属地定位 =================
+
+			// 读取定位配置与面板当前解析到的来源地址
+			auth.GET("/settings/geo/config", func(c *gin.Context) {
+				globalConfig.RLock()
+				proxies := globalConfig.TrustedProxies
+				globalConfig.RUnlock()
+				c.JSON(200, gin.H{
+					"trusted_proxies": proxies,
+					"source_ip":       geoSourceIP(c),
+					"remote_ip":       c.RemoteIP(),
+					"cached":          geoCacheSize(),
+				})
+			})
+
+			// 保存可信代理网段。定位与登录限流是两套相反的信任模型，这里只影响前者 ——
+			// 登录限流始终按不可伪造的 TCP 对端计数，不会因为这项配置被削弱。
+			auth.POST("/settings/geo/config", func(c *gin.Context) {
+				raw := strings.TrimSpace(c.PostForm("trusted_proxies"))
+				if msg := validateProxyCIDRs(raw); msg != "" {
+					c.String(400, msg)
+					return
+				}
+				saveConfig("trusted_proxies", raw)
+				globalConfig.Lock()
+				globalConfig.TrustedProxies = raw
+				globalConfig.Unlock()
+				reloadTrustedProxies()
+
+				desc := raw
+				if desc == "" {
+					desc = "（留空，只认 TCP 对端）"
+				}
+				audit(c, "geo_config", "", "更新可信代理网段："+desc, true)
+				c.Status(200)
+			})
+
+			// 清掉定位缓存，强制下一轮重新查询
+			auth.POST("/settings/geo/refresh", func(c *gin.Context) {
+				id := cleanField(c.PostForm("id"), 64)
+				n := resetGeo(id)
+				label := id
+				if label == "" {
+					label = "全部节点"
+				}
+				audit(c, "geo_refresh", label, fmt.Sprintf("重新定位，重置 %d 个节点", n), true)
+				c.JSON(200, gin.H{"count": n})
+			})
+
+			// 手动指定国家码。共享机房 IP、代理出口这类自动定位确实不准的情况，
+			// 这是用户唯一的纠正手段 —— 没有它就只能一直看着错误的旗帜。
+			auth.POST("/settings/geo/set", func(c *gin.Context) {
+				id := cleanField(c.PostForm("id"), 64)
+				if id == "" {
+					c.String(400, "缺少节点 ID")
+					return
+				}
+				code := strings.ToUpper(strings.TrimSpace(c.PostForm("code")))
+				if code != "" && !isAlpha2(code) {
+					c.String(400, "国家码应为两位字母，如 HK / JP / US（留空表示恢复自动定位）")
+					return
+				}
+				// 非空表示手动锁定：geo_ip 置为 manual，之后心跳不再自动覆盖
+				geoIP := code
+				if code != "" {
+					geoIP = "manual"
+				}
+				if err := db.Model(&Node{}).Where("agent_id = ?", id).
+					Updates(map[string]interface{}{"country_code": code, "geo_ip": geoIP}).Error; err != nil {
+					c.String(500, "保存失败，请重试")
+					return
+				}
+				audit(c, "geo_set", id, "手动指定归属地为 "+code, true)
+				c.Status(200)
+			})
 		}
 	}
 
@@ -1136,6 +1218,7 @@ func loadGlobalConfig() {
 	globalConfig.HistoryKeepHours = 24
 	globalConfig.AuditKeepDays = 90
 	globalConfig.SessionEpoch = ""
+	globalConfig.TrustedProxies = ""
 	defaultTargets := []PingTargetConfig{{Target: "8.8.8.8:53", Alias: "Google DNS"}}
 
 	seen := make(map[string]bool, len(cfgs))
@@ -1202,6 +1285,9 @@ func loadGlobalConfig() {
 		// === 会话版本 ===
 		case "session_epoch":
 			globalConfig.SessionEpoch = c.Value
+		// === 归属地定位 ===
+		case "trusted_proxies":
+			globalConfig.TrustedProxies = c.Value
 		}
 	}
 
