@@ -107,7 +107,29 @@ sudo ./install.sh uninstall
 MIRROR="https://ghfast.top/"     # 留空为直连
 ```
 
-### 方式二：手动部署
+### 方式二：Docker
+
+```bash
+docker build -t hub-monitor .
+
+docker run -d --name monitor \
+  -p 8080:8080 \
+  -v /opt/monitor:/app \
+  -e SESSION_KEY='请替换为至少32位的随机字符串' \
+  hub-monitor
+```
+
+> **必须挂载 `/app`**：SQLite 数据库（`monitor.db`，含 `-wal` / `-shm`）与缓存的
+> Agent 二进制（`agents/`）都在这个目录下。不挂载的话，容器重建即丢失全部数据。
+
+Docker 环境下**面板自更新会被主动禁用**（二进制在镜像里，替换了也会被下一次
+`docker run` 覆盖）。升级请走镜像：
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+### 方式三：手动部署
 
 从 [Releases](https://github.com/jinhuaitao/Monitor/releases/latest) 下载对应架构的
 `monitor-linux-amd64` 或 `monitor-linux-arm64`，然后：
@@ -390,7 +412,7 @@ Agent 下次心跳（≤ 5 秒）时收到指令，从 `/api/agent/binary` 下�
 - Go 1.23 及以上（`go.mod` 声明的语言版本是 `1.23`；CI 使用 Go 1.27 构建）
 - 无需 gcc：依赖链全部是纯 Go（SQLite 使用 `glebarez/sqlite`）
 
-### 本地构建与测试
+### 本地构建
 
 ```bash
 # 静态编译（与 CI 一致，务必保持 CGO_ENABLED=0）
@@ -399,10 +421,6 @@ CGO_ENABLED=0 go build -trimpath -o monitor .
 # 静态检查
 gofmt -l .
 go vet ./...
-
-# 单元测试（含竞态检测）
-go test ./...
-go test -race ./...
 
 # 交叉编译
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o monitor-linux-arm64 .
@@ -430,14 +448,13 @@ CGO_ENABLED=0 go build -trimpath \
 | `pwa.go` | manifest、Service Worker、离线页、运行时绘制的图标 |
 | `ui.go` | 内嵌的仪表盘与登录页模版（HTML + CSS + JS） |
 | `version.go` | 构建期注入的版本变量 |
-| `*_test.go` | 单元测试 |
 | `install.sh` | 服务端安装 / 升级 / 卸载脚本 |
 | `Dockerfile` / `.dockerignore` | 容器镜像 |
-| `.github/workflows/build.yml` | CI：格式检查 → vet → 测试 → 交叉编译 → 静态链接校验 → 发布 |
+| `.github/workflows/build.yml` | CI：格式检查 → vet → 编译门禁 → 交叉编译 → 静态链接校验 → 发布 |
 
 ### CI 做了什么
 
-1. `gofmt` 检查、`go vet`、`go test -race`；
+1. `gofmt` 检查、`go vet`、编译门禁（`-mod=readonly`）；
 2. 交叉编译 `linux/amd64` 与 `linux/arm64`；
 3. **静态链接防回归校验**：检查 ELF 是否含 `INTERP` 段、是否引用 `GLIBC_` 符号
    —— 一旦有人重新打开 CGO，Alpine 用户会立刻遇到启动崩溃；
