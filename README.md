@@ -107,29 +107,7 @@ sudo ./install.sh uninstall
 MIRROR="https://ghfast.top/"     # 留空为直连
 ```
 
-### 方式二：Docker
-
-```bash
-docker build -t hub-monitor .
-
-docker run -d --name monitor \
-  -p 8080:8080 \
-  -v /opt/monitor:/app \
-  -e SESSION_KEY='请替换为至少32位的随机字符串' \
-  hub-monitor
-```
-
-> **必须挂载 `/app`**：SQLite 数据库（`monitor.db`，含 `-wal` / `-shm`）与缓存的
-> Agent 二进制（`agents/`）都在这个目录下。不挂载的话，容器重建即丢失全部数据。
-
-Docker 环境下**面板自更新会被主动禁用**（二进制在镜像里，替换了也会被下一次
-`docker run` 覆盖）。升级请走镜像：
-
-```bash
-docker compose pull && docker compose up -d
-```
-
-### 方式三：手动部署
+### 方式二：手动部署
 
 从 [Releases](https://github.com/jinhuaitao/Monitor/releases/latest) 下载对应架构的
 `monitor-linux-amd64` 或 `monitor-linux-arm64`，然后：
