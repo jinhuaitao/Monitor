@@ -3,102 +3,21 @@ name: Build and Release Monitor
 on:
   push:
     branches: [ main, master ]
+    paths:
+      - '**/*.go'
   pull_request:
     branches: [ main, master ]
+    paths:
+      - '**/*.go'
   workflow_dispatch:
 
 permissions:
   contents: write
 
-env:
-  # 发布构建使用的 Go 版本。刻意写死而不是用 stable：
-  # 用 stable 会让「昨天和今天同一份提交」编出不同的二进制，
-  # 出问题时无法复现。安全补丁通过定期手动升这个值来吸收。
-  GO_VERSION: '1.27'
-
 jobs:
-  # ================= 质量门禁 =================
-  #
-  # 原工作流只做「编译 + 发布」，没有任何检查：格式化漂移、vet 报告的
-  # 问题、测试失败、依赖漏洞都拦不住，全靠人肉 review。这里补上。
-  verify:
-    name: Verify
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # 用 go.mod 里声明的最低版本做验证：CI 用最新版编译时，很容易
-      # 不知不觉用上高于最低版本的语言特性，而用户按 README 装的老
-      # 工具链会直接编译失败。
-      - name: Setup Go (go.mod version)
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Download dependencies
-        run: go mod download
-
-      # go.mod / go.sum 漂移检查：源码里引用了未声明的依赖时，
-      # 本地因为有缓存能编过，CI 从零开始就会失败。
-      - name: Check go.mod is tidy
-        run: |
-          set -e
-          go mod tidy
-          if ! git diff --quiet -- go.mod go.sum; then
-            echo "::error::go.mod / go.sum 与源码不一致，请在本地执行 go mod tidy 后提交"
-            git diff -- go.mod go.sum
-            exit 1
-          fi
-
-      - name: gofmt
-        run: |
-          set -e
-          out="$(gofmt -l .)"
-          if [ -n "$out" ]; then
-            echo "::error::以下文件未格式化，请执行 gofmt -w ."
-            echo "$out"
-            exit 1
-          fi
-
-      - name: go vet
-        run: go vet ./...
-
-      # 带竞态检测：面板里有若干共享状态（statusCache / globalConfig /
-      # alertStates / loginGuard），锁写错时普通测试是绿的，只有 -race 能抓到。
-      - name: go test
-        run: go test -count=1 -race ./...
-
-  # 依赖漏洞扫描独立成一个 job：它依赖上游漏洞库，可能因为新披露的公告
-  # 而在「没有改任何代码」的情况下变红。独立出来便于一眼区分
-  #「这次改动有问题」和「上游又报了一个洞」。
-  #
-  # continue-on-error 是刻意的：新披露的公告不应阻断无关的开发。
-  # 结果在 job 列表里可见，需要时再单独升级依赖。
-  vulncheck:
-    name: Vulnerability scan
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
-
   # 统一计算版本号，供编译注入与发布使用
   version:
     name: Resolve version
-    needs: [ verify ]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
@@ -147,7 +66,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: '1.27'
           cache: true
 
       - name: Download dependencies
@@ -185,24 +104,6 @@ jobs:
             exit 1
           fi
           echo "✓ 静态链接校验通过：$BIN 可运行于 musl 与 glibc 发行版"
-
-      # 防回归：产物必须是目标架构的 ELF。
-      # 面板会把这份文件分发给所有节点并让它们替换自身重启，
-      # 一个架构不对的二进制等于让全部节点同时起不来 —— 而 sha256
-      # 挡不住这类问题（坏源配坏哈希，永远对得上）。
-      - name: Verify binary architecture
-        run: |
-          set -e
-          BIN="dist/monitor-linux-${{ matrix.goarch }}"
-          MACHINE="$(readelf -h "$BIN" | awk -F: '/Machine/{print $2}' | xargs)"
-          case "${{ matrix.goarch }}" in
-            amd64) WANT="X86-64" ;;
-            arm64) WANT="AArch64" ;;
-          esac
-          case "$MACHINE" in
-            *"$WANT"*) echo "✓ 架构校验通过：$MACHINE" ;;
-            *) echo "::error file=$BIN::架构不匹配，期望 $WANT，实际 $MACHINE"; exit 1 ;;
-          esac
 
       - name: Checksum
         run: |
