@@ -11,7 +11,9 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -93,6 +95,8 @@ var (
 		AuditKeepDays    int
 		// === 会话版本：改密码后自增，旧 Cookie 立即失效 ===
 		SessionEpoch string
+		// === 来源地址：可信反向代理白名单（详见「来源地址与地理位置」）===
+		TrustedProxies string
 	}
 )
 
@@ -126,6 +130,8 @@ type Node struct {
 	Group         string    `gorm:"default:''"`    // [新增] 分组，用于节点多时的归类与筛选
 	Maintenance   bool      `gorm:"default:false"` // [新增] 维护模式：期间不触发任何告警
 	AlertMuted    bool      `gorm:"default:false"` // [新增] 仅静音告警，但节点仍正常显示
+	LastGeoIP     string    `gorm:"default:''"`    // [新增] 上次做地理位置解析时用的地址
+	GeoAt         time.Time                        // [新增] 上次解析时间，用于判断是否需要重查
 }
 
 type MonitorHistory struct {
@@ -282,6 +288,350 @@ func installCommand(serverURL, token, id string) string {
 	).Replace(installCmdTmpl)
 }
 
+// ================= 来源地址与地理位置 =================
+//
+// 这一节回答一个看着简单、实际很容易做错的问题：面板该把「哪个地址」
+// 当成节点的地址。
+//
+// 面板其实有两个用途完全不同的 IP 概念，早期版本把它们混成了一个：
+//
+//	① 审计 / 限流用的来源地址 —— 必须是真实 TCP 对端（RemoteIP）。
+//	   转发头是请求方随手就能写的，采信它等于让限流形同虚设（见 admin.go 的 loginKey）。
+//	② 展示 / 定位用的客户端地址 —— 在反代或容器里，真实客户端地址只存在于
+//	   X-Forwarded-For 这类头部中，必须采信，否则拿到的是代理自己的地址。
+//
+// 早期实现只有 ①：SetTrustedProxies(nil) 之后 ClientIP() 退化成 RemoteIP()，
+// 于是面板前面只要有一层 nginx / CDN，所有节点都会被定位成代理所在国
+//（典型现象：满屏同一面国旗）；若是同机反代或 Docker 桥接，对端是
+// 127.0.0.1 / 172.17.0.1 这类私网地址，ip-api 直接返回 fail，
+// country_code 为空，界面上就是一面白旗。
+//
+// 修法不是「把转发头全部信任」——那会把 ① 一起废掉——而是给 ② 一条显式的、
+// 可配置的可信代理链：只有对端确实落在白名单里，才采信转发头。
+
+// geoSkipNets 这些网段永远不会出现在公网上，拿去定位只会浪费一次请求
+//（ip-api 对私网地址会返回 status=fail / reserved range）。
+var geoSkipNets = func() []*net.IPNet {
+	cidrs := []string{
+		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+		"127.0.0.0/8", "169.254.0.0/16",
+		"100.64.0.0/10", // CGNAT：运营商级 NAT，公网上不可路由
+		"fc00::/7", "fe80::/10",
+	}
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, s := range cidrs {
+		if _, n, err := net.ParseCIDR(s); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
+func isPublicIP(ip string) bool {
+	p := net.ParseIP(strings.TrimSpace(ip))
+	if p == nil {
+		return false
+	}
+	if p.IsLoopback() || p.IsPrivate() || p.IsUnspecified() ||
+		p.IsLinkLocalUnicast() || p.IsLinkLocalMulticast() {
+		return false
+	}
+	for _, n := range geoSkipNets {
+		if n.Contains(p) {
+			return false
+		}
+	}
+	return true
+}
+
+// ================= 可信代理白名单 =================
+
+// 解析后的白名单缓存。用读写锁保护，支持保存后立即生效，
+// 不必重启面板 —— 否则用户改完白名单看不到变化，只会以为功能坏了。
+var trustedProxyCache struct {
+	sync.RWMutex
+	nets []*net.IPNet
+	ips  []net.IP
+}
+
+// splitProxyList 把逗号 / 分号 / 空白分隔的列表切成条目，无法识别的直接丢弃。
+// 解析失败不报错：宁可少信任一层，也不能让面板起不来。
+func splitProxyList(raw string) []string {
+	out := make([]string, 0, 4)
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if net.ParseIP(part) != nil {
+			out = append(out, part)
+			continue
+		}
+		if _, _, err := net.ParseCIDR(part); err == nil {
+			out = append(out, part)
+			continue
+		}
+		log.Printf("[proxy] 忽略无法识别的可信代理条目: %q", part)
+	}
+	return out
+}
+
+func setTrustedProxies(raw string) {
+	var nets []*net.IPNet
+	var ips []net.IP
+	for _, part := range splitProxyList(raw) {
+		if _, n, err := net.ParseCIDR(part); err == nil {
+			nets = append(nets, n)
+			continue
+		}
+		if p := net.ParseIP(part); p != nil {
+			ips = append(ips, p)
+		}
+	}
+	trustedProxyCache.Lock()
+	trustedProxyCache.nets, trustedProxyCache.ips = nets, ips
+	trustedProxyCache.Unlock()
+	if len(nets)+len(ips) > 0 {
+		log.Printf("[proxy] 已信任 %d 条代理来源，将据此采信 X-Forwarded-For", len(nets)+len(ips))
+	}
+}
+
+func isTrustedProxy(ip string) bool {
+	p := net.ParseIP(strings.TrimSpace(ip))
+	if p == nil {
+		return false
+	}
+	trustedProxyCache.RLock()
+	defer trustedProxyCache.RUnlock()
+	for _, n := range trustedProxyCache.nets {
+		if n.Contains(p) {
+			return true
+		}
+	}
+	for _, t := range trustedProxyCache.ips {
+		if t.Equal(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeProxyList 校验并规范化用户填写的白名单。
+//
+// 这里必须挡住 0.0.0.0/0（以及等价的 ::/0）：一旦信任全部来源，
+// 任何人只要在请求里加一个 X-Forwarded-For 就能伪造来源地址，
+// 登录失败计数会被逐个伪造 IP 绕开 —— 等于把刚补上的限流又拆掉。
+func normalizeProxyList(raw string) (string, error) {
+	var out []string
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, n, err := net.ParseCIDR(part); err == nil {
+			if ones, _ := n.Mask.Size(); ones == 0 {
+				return "", fmt.Errorf("不接受 %s：那等于信任任何来源，登录限流会被伪造的转发头绕过", part)
+			}
+			out = append(out, part)
+			continue
+		}
+		if net.ParseIP(part) != nil {
+			out = append(out, part)
+			continue
+		}
+		return "", fmt.Errorf("无法识别的地址或网段：%s", part)
+	}
+	return strings.Join(out, ","), nil
+}
+
+// forwardedClientIP 从转发头里取出真实客户端地址。
+//
+// 取的是「从右往左第一个不在白名单里的地址」，而不是最左边那一个：
+// 最左边那个是请求方自己写进 X-Forwarded-For 的，前面挂多少层代理都改不了
+// 这一点 —— 直接采信它等于让任何人都能声明自己是任意 IP。
+func forwardedClientIP(c *gin.Context) string {
+	if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			ip := strings.TrimSpace(parts[i])
+			if net.ParseIP(ip) == nil {
+				continue
+			}
+			if isTrustedProxy(ip) {
+				continue // 这一跳本身也是我们的代理，继续往左找
+			}
+			return canonicalIP(ip)
+		}
+	}
+	if rip := strings.TrimSpace(c.GetHeader("X-Real-IP")); net.ParseIP(rip) != nil {
+		return canonicalIP(rip)
+	}
+	return ""
+}
+
+// canonicalIP 统一成规范形式：把 ::ffff:1.2.3.4 这类 IPv4-mapped 地址
+// 还原成 1.2.3.4，否则拿去查 ip-api 会直接失败。
+func canonicalIP(ip string) string {
+	p := net.ParseIP(strings.TrimSpace(ip))
+	if p == nil {
+		return ""
+	}
+	if v4 := p.To4(); v4 != nil {
+		return v4.String()
+	}
+	return p.String()
+}
+
+// realClientIP 返回用于展示与定位的客户端地址。
+//
+// 与 c.ClientIP() 的区别：只在【对端确实是白名单里的代理】时才采信转发头，
+// 因此伪造请求头无法影响结果；白名单为空时行为与 RemoteIP() 完全一致。
+func realClientIP(c *gin.Context) string {
+	peer := canonicalIP(c.RemoteIP())
+	if peer == "" {
+		return ""
+	}
+	if isTrustedProxy(peer) {
+		if ip := forwardedClientIP(c); ip != "" {
+			return ip
+		}
+	}
+	return peer
+}
+
+// ================= 地理位置解析 =================
+
+const (
+	geoFailedRetry  = 6 * time.Hour      // 解析失败（私网 / 被限流）后的重试间隔
+	geoRefreshAfter = 7 * 24 * time.Hour // 解析成功后的重查周期
+)
+
+// geoInflight 记录正在进行的解析，避免同一节点被并发查询多次。
+// 心跳 5 秒一次，而结论要写库之后才会被下一轮看到 —— 没有这个去重，
+// 一个新节点会在几秒内白白消耗好几次免费额度（ip-api 免费档 45 次/分钟）。
+var geoInflight = struct {
+	sync.Mutex
+	m map[string]bool
+}{m: make(map[string]bool)}
+
+// needGeoLookup 判断这次心跳是否需要（重新）解析地理位置
+func needGeoLookup(node Node, ip string) bool {
+	if node.LastGeoIP == ip {
+		// 同一地址刚查过：失败过的按短周期重试，成功过的按长周期复查
+		if node.CountryCode == "" {
+			return time.Since(node.GeoAt) > geoFailedRetry
+		}
+		return time.Since(node.GeoAt) > geoRefreshAfter
+	}
+	return true // 首次，或节点换了地址（换机房 / 代理配置修正），旧结论不再适用
+}
+
+// geoLookupAsync 异步解析节点地址所属国家。
+//
+// 三个必须守住的点：
+//   - ip 为空时绝不能发请求。ip-api 的接口在 ip 为空时会把【请求方自己】
+//     （也就是面板服务器）的位置返回回来，于是所有节点都被标成面板所在国 ——
+//     这是「旗帜不对」里最难查的一种。
+//   - 私网 / 保留地址先挡掉，既省额度也避免拿到无意义的结果。
+//   - 必须带超时。默认的 http.Client 没有超时，对方挂住时 goroutine 会一直堆积
+//     （alert.go 里为同样的问题专门建了 alertClient，这里早期版本漏了）。
+func geoLookupAsync(agentID, ip string) {
+	if agentID == "" {
+		return
+	}
+	if !isPublicIP(ip) {
+		// 记一笔「已处理」，否则每轮心跳都会重新判断一遍
+		stampGeo(agentID, ip, "")
+		return
+	}
+
+	geoInflight.Lock()
+	if geoInflight.m[agentID] {
+		geoInflight.Unlock()
+		return
+	}
+	geoInflight.m[agentID] = true
+	geoInflight.Unlock()
+
+	go func() {
+		defer func() {
+			geoInflight.Lock()
+			delete(geoInflight.m, agentID)
+			geoInflight.Unlock()
+		}()
+
+		cli := &http.Client{Timeout: 8 * time.Second}
+		// fields 只取需要的两项：响应体更小，也不浪费免费额度
+		u := "http://ip-api.com/json/" + url.PathEscape(ip) + "?fields=status,countryCode"
+		resp, err := cli.Get(u)
+		if err != nil {
+			log.Printf("[geo] 解析 %s 失败: %v", ip, err)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			log.Printf("[geo] 解析 %s 返回状态码 %d", ip, resp.StatusCode)
+			return
+		}
+		var res struct {
+			Status      string `json:"status"`
+			CountryCode string `json:"countryCode"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&res); err != nil {
+			return
+		}
+		// 免费接口用 status 表达成败（fail 时 countryCode 为空）。
+		// 只看 countryCode 会漏掉「查询被拒绝」与「查询成功但无国家」的区别，
+		// 也就无法决定该用短周期重试还是长周期复查。
+		if res.Status != "success" {
+			log.Printf("[geo] 解析 %s 被拒绝（status=%s）", ip, res.Status)
+			stampGeo(agentID, ip, "")
+			return
+		}
+		cc := strings.ToUpper(strings.TrimSpace(res.CountryCode))
+		if len(cc) != 2 {
+			stampGeo(agentID, ip, "")
+			return
+		}
+		stampGeo(agentID, ip, cc)
+	}()
+}
+
+// stampGeo 记录本次解析用的地址、时间与结论，并同步刷新内存缓存。
+//
+// 存 LastGeoIP 是为了「节点换了机房 / 代理配置修正」时能自动重新定位；
+// 存 GeoAt 是为了定期重查 —— 早期实现只在 country_code 为空时查询，
+// 一旦写进一个错误的国家就再也纠正不回来。
+func stampGeo(agentID, ip, cc string) {
+	upd := map[string]interface{}{
+		"last_geo_ip": ip,
+		"geo_at":      time.Now(),
+	}
+	if cc != "" {
+		upd["country_code"] = cc
+	}
+	if db != nil {
+		if err := db.Model(&Node{}).Where("agent_id = ?", agentID).Updates(upd).Error; err != nil {
+			log.Printf("[geo] 写入失败: %v", err)
+			return
+		}
+	}
+	if cc == "" {
+		return
+	}
+	// 缓存里也同步一份，省得等下一轮心跳或 /api/stats 才纠正过来
+	cacheMutex.Lock()
+	if st, ok := statusCache[agentID]; ok {
+		st.CountryCode = cc
+		statusCache[agentID] = st
+	}
+	cacheMutex.Unlock()
+}
+
 // ================= 服务端 =================
 
 func runServer(port string) {
@@ -304,7 +654,17 @@ func runServer(port string) {
 	// gin 默认把 X-Forwarded-For 当作可信来源，于是 ClientIP() 可被请求方随意伪造 ——
 	// 对「登录限流」这种按 IP 计数的防护来说，等于形同虚设。
 	// 这里显式关掉信任代理，ClientIP()/RemoteIP() 一律回落到真实 TCP 对端。
+	//
+	// 注意：界面展示与地理位置解析需要的「真实客户端地址」【不走】gin 这套机制，
+	// 而是由 realClientIP() 按「可信代理白名单」自行判断（见「来源地址与地理位置」）。
+	// 于是限流链路只认 RemoteIP、展示链路才采信转发头，两者互不影响 ——
+	// 早期版本两条链路共用 ClientIP()，一旦面板前面挂了反代，
+	// 所有节点都会被定位成代理所在国（或因为拿到私网地址而显示白旗）。
 	_ = r.SetTrustedProxies(nil)
+	globalConfig.RLock()
+	tps := globalConfig.TrustedProxies
+	globalConfig.RUnlock()
+	setTrustedProxies(tps)
 
 	// PWA：manifest / Service Worker / 运行时绘制的图标 / 离线页
 	registerPWARoutes(r)
@@ -556,8 +916,12 @@ func runServer(port string) {
 				// 先收敛不可信字段，再进入缓存 / 数据库 / 界面
 				sanitizeReport(&s)
 				s.LastUpdate = time.Now()
-				if s.IP == "" {
-					s.IP = c.ClientIP()
+				// 节点地址一律以连接来源为准：上报体里的 IP 字段任何持有 Token 的
+				// 客户端都能伪造，而它同时用于界面展示与地理位置解析 ——
+				// 采信它等于让别人替你决定卡片上显示哪个国家。
+				// realClientIP 只在【对端确实属于可信代理】时才采信转发头。
+				if ip := realClientIP(c); ip != "" {
+					s.IP = ip
 				}
 
 				var node Node
@@ -569,19 +933,12 @@ func runServer(port string) {
 					return
 				}
 
-				if node.CountryCode == "" {
-					go func(aid, ip string) {
-						resp, err := http.Get("http://ip-api.com/json/" + ip)
-						if err == nil {
-							defer resp.Body.Close()
-							var res struct {
-								CountryCode string `json:"countryCode"`
-							}
-							if json.NewDecoder(resp.Body).Decode(&res) == nil && res.CountryCode != "" {
-								db.Model(&Node{}).Where("agent_id=?", aid).Update("country_code", res.CountryCode)
-							}
-						}
-					}(s.AgentID, s.IP)
+				// 地理位置解析：仅在「没有结论 / 地址变了 / 距上次解析超过重查周期」
+				// 时才做，判定见 needGeoLookup。
+				// 早期实现只在 country_code 为空时查询，一旦写进一个错误的国家
+				// （反代场景下非常容易发生）就再也纠正不回来了。
+				if needGeoLookup(node, s.IP) {
+					geoLookupAsync(s.AgentID, s.IP)
 				}
 
 				// [新增] 同步客户端架构 / 版本，并处理更新回执
@@ -1136,6 +1493,8 @@ func loadGlobalConfig() {
 	globalConfig.HistoryKeepHours = 24
 	globalConfig.AuditKeepDays = 90
 	globalConfig.SessionEpoch = ""
+	// 默认为空 = 不信任任何代理，与改动前的行为完全一致（直连部署无需配置）
+	globalConfig.TrustedProxies = ""
 	defaultTargets := []PingTargetConfig{{Target: "8.8.8.8:53", Alias: "Google DNS"}}
 
 	seen := make(map[string]bool, len(cfgs))
@@ -1202,6 +1561,9 @@ func loadGlobalConfig() {
 		// === 会话版本 ===
 		case "session_epoch":
 			globalConfig.SessionEpoch = c.Value
+		// === 来源地址 ===
+		case "trusted_proxies":
+			globalConfig.TrustedProxies = c.Value
 		}
 	}
 
