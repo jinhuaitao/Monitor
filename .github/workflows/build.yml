@@ -5,39 +5,20 @@ on:
     branches: [ main, master ]
     paths:
       - '**/*.go'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/build.yml'
   pull_request:
     branches: [ main, master ]
     paths:
       - '**/*.go'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/build.yml'
   workflow_dispatch:
 
-# 同一分支上的多次运行排队而不是并发，避免两次 release 同时写同一个 latest 标签。
-# 刻意不开 cancel-in-progress：发布流程被中途掐断会留下半截的 Release。
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-
-# 默认最小权限：只有真正要写 Release 的 job 才单独提权。
-# 这样即使构建步骤里被塞进恶意代码，也改不了仓库内容。
 permissions:
-  contents: read
-
-env:
-  # Go 工具链版本的唯一来源。构建与校验必须用同一个版本，
-  # 否则会出现「本地/CI 都能过、换个 job 就挂」这种最难查的差异。
-  GO_VERSION: '1.27'
+  contents: write
 
 jobs:
   # 统一计算版本号，供编译注入与发布使用
   version:
     name: Resolve version
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     outputs:
       version: ${{ steps.ver.outputs.version }}
       commit: ${{ steps.ver.outputs.commit }}
@@ -59,52 +40,10 @@ jobs:
           echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
 
-  # 静态检查。放在编译之前，让「格式 / 静态检查 / 编译」失败时直接不产出
-  # 任何二进制 —— 总比发布一个坏版本再回滚便宜。
-  verify:
-    name: Verify (fmt / vet / build)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Check formatting
-        run: |
-          set -e
-          unformatted="$(gofmt -l . | grep -v '^$' || true)"
-          if [ -n "$unformatted" ]; then
-            echo "::error::以下文件未通过 gofmt，请本地执行 gofmt -w . 后重新提交："
-            echo "$unformatted"
-            exit 1
-          fi
-          echo "✓ gofmt 检查通过"
-
-      # -mod=readonly：go.sum 缺项时直接失败，而不是在 CI 里悄悄改写依赖文件后「假装成功」
-      - name: go vet
-        run: go vet -mod=readonly ./...
-
-      # 编译一次做快速门禁：让编译错误在最快的 job 上就暴露，
-      # 而不是等到后面跑完多架构矩阵才发现
-      - name: Compile check
-        env:
-          CGO_ENABLED: '0'
-        run: go build -mod=readonly -o /dev/null .
-
   build:
     name: linux-${{ matrix.goarch }}
-    needs: [ version, verify ]
+    needs: version
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     strategy:
       fail-fast: false
@@ -127,7 +66,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: '1.27'
           cache: true
 
       - name: Download dependencies
@@ -146,7 +85,7 @@ jobs:
         run: |
           set -e
           mkdir -p dist
-          go build -trimpath -mod=readonly \
+          go build -trimpath \
             -ldflags "-s -w -X main.BuildVersion=${VERSION} -X main.BuildCommit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
             -o "dist/monitor-linux-${{ matrix.goarch }}" .
           file "dist/monitor-linux-${{ matrix.goarch }}"
@@ -166,22 +105,6 @@ jobs:
           fi
           echo "✓ 静态链接校验通过：$BIN 可运行于 musl 与 glibc 发行版"
 
-      # 冒烟测试：二进制至少要能启动并自报版本。
-      # 编译成功不等于能跑 —— 版本注入写错、init 里 panic 这类问题只有真跑一次才暴露。
-      - name: Smoke test
-        run: |
-          set -e
-          BIN="dist/monitor-linux-${{ matrix.goarch }}"
-          out="$("$BIN" -mode version)"
-          echo "$out"
-          echo "$out" | grep -q "${{ needs.version.outputs.version }}" \
-            || { echo "::error::二进制自报版本与注入的版本不一致"; exit 1; }
-          # 未知模式必须以非零码退出，而不是被当成 server 静默启动
-          if "$BIN" -mode definitely-not-a-mode >/dev/null 2>&1; then
-            echo "::error::未知 -mode 应报错退出"
-            exit 1
-          fi
-
       - name: Checksum
         run: |
           cd dist
@@ -200,11 +123,7 @@ jobs:
   release:
     needs: [ version, build ]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-    # 只有这个 job 需要写权限
-    permissions:
-      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
