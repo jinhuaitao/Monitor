@@ -131,7 +131,7 @@ type Node struct {
 	Maintenance   bool      `gorm:"default:false"` // [新增] 维护模式：期间不触发任何告警
 	AlertMuted    bool      `gorm:"default:false"` // [新增] 仅静音告警，但节点仍正常显示
 	LastGeoIP     string    `gorm:"default:''"`    // [新增] 上次做地理位置解析时用的地址
-	GeoAt         time.Time                        // [新增] 上次解析时间，用于判断是否需要重查
+	GeoAt         time.Time // [新增] 上次解析时间，用于判断是否需要重查
 }
 
 type MonitorHistory struct {
@@ -310,7 +310,7 @@ func installCommand(serverURL, token, id string) string {
 // 可配置的可信代理链：只有对端确实落在白名单里，才采信转发头。
 
 // geoSkipNets 这些网段永远不会出现在公网上，拿去定位只会浪费一次请求
-//（ip-api 对私网地址会返回 status=fail / reserved range）。
+// （ip-api 对私网地址会返回 status=fail / reserved range）。
 var geoSkipNets = func() []*net.IPNet {
 	cidrs := []string{
 		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
@@ -424,22 +424,25 @@ func isTrustedProxy(ip string) bool {
 // 任何人只要在请求里加一个 X-Forwarded-For 就能伪造来源地址，
 // 登录失败计数会被逐个伪造 IP 绕开 —— 等于把刚补上的限流又拆掉。
 func normalizeProxyList(raw string) (string, error) {
-	var out []string
+	out := make([]string, 0, 4)
+	seen := make(map[string]bool, 4)
 	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
 	}) {
 		part = strings.TrimSpace(part)
-		if part == "" {
+		if part == "" || seen[part] {
 			continue
 		}
 		if _, n, err := net.ParseCIDR(part); err == nil {
 			if ones, _ := n.Mask.Size(); ones == 0 {
 				return "", fmt.Errorf("不接受 %s：那等于信任任何来源，登录限流会被伪造的转发头绕过", part)
 			}
+			seen[part] = true
 			out = append(out, part)
 			continue
 		}
 		if net.ParseIP(part) != nil {
+			seen[part] = true
 			out = append(out, part)
 			continue
 		}
@@ -453,6 +456,9 @@ func normalizeProxyList(raw string) (string, error) {
 // 取的是「从右往左第一个不在白名单里的地址」，而不是最左边那一个：
 // 最左边那个是请求方自己写进 X-Forwarded-For 的，前面挂多少层代理都改不了
 // 这一点 —— 直接采信它等于让任何人都能声明自己是任意 IP。
+//
+// 注意白名单要尽量写窄。把 10.0.0.0/8 这种整个内网段写进来，会让内网里的
+// 客户端地址也被当成「一跳代理」跳过，反而回退到更左侧那个可伪造的值。
 func forwardedClientIP(c *gin.Context) string {
 	if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
@@ -510,6 +516,12 @@ const (
 	geoRefreshAfter = 7 * 24 * time.Hour // 解析成功后的重查周期
 )
 
+// geoEndpoint 定位接口地址。抽成变量有两个用处：
+//   - 换服务商时只改这一处（ipwho.is / ipapi.co / 自建 MaxMind 服务都能顶上）；
+//   - 便于在测试里指向本地服务 —— 免费接口在部分网络环境下会被直接拦掉
+//     （返回 403），没有这个钩子就只能靠人工肉眼验证。
+var geoEndpoint = "http://ip-api.com/json/"
+
 // geoInflight 记录正在进行的解析，避免同一节点被并发查询多次。
 // 心跳 5 秒一次，而结论要写库之后才会被下一轮看到 —— 没有这个去重，
 // 一个新节点会在几秒内白白消耗好几次免费额度（ip-api 免费档 45 次/分钟）。
@@ -566,7 +578,7 @@ func geoLookupAsync(agentID, ip string) {
 
 		cli := &http.Client{Timeout: 8 * time.Second}
 		// fields 只取需要的两项：响应体更小，也不浪费免费额度
-		u := "http://ip-api.com/json/" + url.PathEscape(ip) + "?fields=status,countryCode"
+		u := geoEndpoint + url.PathEscape(ip) + "?fields=status,countryCode"
 		resp, err := cli.Get(u)
 		if err != nil {
 			log.Printf("[geo] 解析 %s 失败: %v", ip, err)
