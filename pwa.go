@@ -448,16 +448,10 @@ func registerPWARoutes(r *gin.Engine) {
 	// 健康探针：只回一个 "ok"，供离线页判断面板是否已恢复。
 	// 刻意不放进 Service Worker 的缓存白名单 —— 探针必须真的打到服务端，
 	// 否则会被 SW 用缓存应答，永远"探测成功"。
-	//
-	// 同时注册 HEAD：gin 不会为 GET 自动挂上 HEAD 路由，
-	// 而不少监控系统 / 负载均衡探针默认用 HEAD 探活 ——
-	// 不注册的话它们会拿到 404，从而把一台正常的面板判定为已下线。
-	healthz := func(c *gin.Context) {
+	r.GET("/healthz", func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
 		c.String(http.StatusOK, "ok")
-	}
-	r.GET("/healthz", healthz)
-	r.HEAD("/healthz", healthz)
+	})
 
 	// Service Worker 必须挂在根路径，作用域才能覆盖整站；
 	// 且不能长缓存，否则新版本发布后浏览器一直拿旧脚本。

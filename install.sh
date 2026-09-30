@@ -104,34 +104,15 @@ sha256_of() {
 }
 
 # --- 辅助函数：安装依赖 ---
-# 按包管理器探测而不是按发行版名硬编码：同一个发行版可能有多个分支
-# （CentOS Stream / Rocky / Alma 的 ID 各不相同），探测命令本身最可靠。
 install_deps() {
-    command -v curl >/dev/null 2>&1 && return 0
-
-    printf '%b\n' "${YELLOW}未检测到 curl，正在尝试自动安装...${NC}"
-    if command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl
-    elif command -v apt-get >/dev/null 2>&1; then
-        apt-get update && apt-get install -y curl
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y curl
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y curl
-    elif command -v zypper >/dev/null 2>&1; then
-        zypper --non-interactive install curl
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm curl
-    fi
-
-    # 装不上就必须在这里停住：否则后面 curl 会以 "command not found" 失败，
-    # 而脚本给出的提示会指向「网络问题」，把排查方向带偏。
     if ! command -v curl >/dev/null 2>&1; then
-        printf '%b\n' "${RED}错误: 无法自动安装 curl，请手动安装后重试。${NC}"
-        return 1
+        printf '%b\n' "${YELLOW}正在安装 curl...${NC}"
+        if [ "$OS" = "alpine" ]; then
+            apk add --no-cache curl
+        elif [ "$OS" = "debian" ] || [ "$OS" = "ubuntu" ]; then
+            apt-get update && apt-get install -y curl
+        fi
     fi
-    printf '%b\n' "${GREEN}curl 安装完成。${NC}"
-    return 0
 }
 
 # --- 辅助函数：下载并校验 ---
@@ -215,9 +196,7 @@ wait_stopped() {
 
 # --- 功能 1: 安装 / 更新 ---
 do_install() {
-    if ! install_deps; then
-        return 1
-    fi
+    install_deps
 
     # 停止旧服务
     do_stop >/dev/null 2>&1
@@ -351,10 +330,8 @@ do_start() {
     elif [ $INIT_SYS -eq 2 ]; then
         rc-service "$SERVICE_NAME" start
     else
-        # 必须返回非零：调用方（例如 do_install 的回滚分支）会据此判断
-        # 「服务到底拉起来了没有」，静默返回 0 会让失败看起来像成功。
         printf '%b\n' "${RED}未知的系统类型，无法启动。${NC}"
-        return 1
+        return
     fi
     printf '%b\n' "${GREEN}操作完成。${NC}"
 }
@@ -369,9 +346,6 @@ do_stop() {
         systemctl stop "$SERVICE_NAME"
     elif [ $INIT_SYS -eq 2 ]; then
         rc-service "$SERVICE_NAME" stop
-    else
-        printf '%b\n' "${RED}未知的系统类型，无法停止服务。${NC}"
-        return 1
     fi
     printf '%b\n' "${GREEN}操作完成。${NC}"
 }
@@ -409,37 +383,8 @@ do_status() {
     fi
 }
 
-# --- 动作分发 ---
-# 返回 2 表示「不认识这个动作」，由调用方决定如何提示。
-run_action() {
-    case "$1" in
-        1|install)   do_install ;;
-        2|uninstall) do_uninstall ;;
-        3|start)     do_start ;;
-        4|stop)      do_stop ;;
-        5|restart)   do_restart ;;
-        6|status)    do_status ;;
-        0|exit)      return 0 ;;
-        *)           return 2 ;;
-    esac
-}
-
+# --- 菜单界面 ---
 check_os
-
-# 支持非交互调用，方便写进 cloud-init / 自动化脚本：
-#   ./install.sh install | uninstall | start | stop | restart | status
-# 不带参数时保持原来的交互式菜单。
-if [ -n "$1" ]; then
-    run_action "$1"
-    RC=$?
-    if [ "$RC" -eq 2 ]; then
-        printf '%b\n' "${RED}未知命令: $1${NC}"
-        printf '%b\n' "可用命令: install | uninstall | start | stop | restart | status"
-        exit 2
-    fi
-    exit "$RC"
-fi
-
 clear
 printf '%b\n' "${BLUE}=====================================${NC}"
 printf '%b\n' "   Monitor Server 管理脚本"
@@ -459,10 +404,13 @@ printf '%b\n' "${BLUE}=====================================${NC}"
 printf "请输入数字 [0-6]: "
 read choice
 
-run_action "$choice"
-RC=$?
-if [ "$RC" -eq 2 ]; then
-    printf '%b\n' "${RED}无效输入，退出。${NC}"
-    exit 1
-fi
-exit "$RC"
+case "$choice" in
+    1) do_install ;;
+    2) do_uninstall ;;
+    3) do_start ;;
+    4) do_stop ;;
+    5) do_restart ;;
+    6) do_status ;;
+    0) exit 0 ;;
+    *) printf '%b\n' "${RED}无效输入，退出。${NC}"; exit 1 ;;
+esac

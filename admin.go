@@ -585,7 +585,7 @@ func registerAdminRoutes(auth *gin.RouterGroup) {
 		// 当前会话同样失效，前端收到 200 后会跳回登录页
 		s := sessions.Default(c)
 		s.Clear()
-		saveSession(c, s)
+		s.Save()
 		c.Status(200)
 	})
 
@@ -623,7 +623,7 @@ func registerAdminRoutes(auth *gin.RouterGroup) {
 		s := sessions.Default(c)
 		s.Set("user", newName)
 		s.Set("epoch", sessionEpoch())
-		saveSession(c, s)
+		s.Save()
 		auditAs(c, newName, "username_change", cur, "用户名 "+cur+" 变更为 "+newName, true)
 		c.Status(200)
 	})

@@ -244,9 +244,8 @@ func ghGet(rawURL string) (*http.Response, error) {
 
 func ghGetText(rawURL string) string {
 	// 先走镜像，失败回退直连
-	mirrored := withProxy(rawURL)
-	urls := []string{mirrored}
-	if mirrored != rawURL {
+	urls := []string{withProxy(rawURL)}
+	if withProxy(rawURL) != rawURL {
 		urls = append(urls, rawURL)
 	}
 	for _, u := range urls {
@@ -258,7 +257,7 @@ func ghGetText(rawURL string) string {
 			resp.Body.Close()
 			continue
 		}
-		b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		b, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			continue
@@ -319,9 +318,7 @@ func fetchLatestRelease() (*ReleaseInfo, error) {
 			lastErr = fmt.Errorf("GitHub 返回状态码 %d", resp.StatusCode)
 			continue
 		}
-		// 限长：GitHub 的 releases/latest 响应通常只有几 KB，
-		// 但镜像/中间层返回什么并不由我们决定
-		b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		b, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			lastErr = err
@@ -443,9 +440,8 @@ func fileSHA256(path string) (string, error) {
 
 func downloadAsset(a *ReleaseAsset, dest string) error {
 	// 先走镜像，失败自动回退直连
-	mirrored := withProxy(a.URL)
-	urls := []string{mirrored}
-	if mirrored != a.URL {
+	urls := []string{withProxy(a.URL)}
+	if withProxy(a.URL) != a.URL {
 		urls = append(urls, a.URL)
 	}
 
@@ -461,40 +457,6 @@ func downloadAsset(a *ReleaseAsset, dest string) error {
 		lastErr = fmt.Errorf("下载失败")
 	}
 	return lastErr
-}
-
-// shortHash 安全截断哈希，仅用于日志与错误信息。
-//
-// 直接写 got[:12] 是有风险的：wantSHA 来自发布仓库的 .sha256 资源，
-// 内容不由我们控制。万一对方返回的是错误页或一个短字符串，
-// 切片就会越界 panic —— 而 tryDownload 跑在 go func() 里，
-// 未捕获的 panic 会直接带崩整个面板进程，不只是「这次更新失败」。
-func shortHash(s string) string {
-	if len(s) > 12 {
-		return s[:12]
-	}
-	return s
-}
-
-// looksLikeSHA256 判断字符串是否为 64 位十六进制，也就是 sha256 的正常形态。
-//
-// 单独判断的必要性：如果只是「比对失败」，用户看到的是「校验不通过」，
-// 会顺着「网络被改写 / 下载被劫持」去排查；而真实原因可能只是
-// 发布仓库里那个 .sha256 文件本身写坏了。两者的排查方向完全不同。
-// 注意这里仍然【拒绝安装】—— 校验值不可信时宁可失败，也不能放过。
-func looksLikeSHA256(s string) bool {
-	if len(s) != 64 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 func tryDownload(url, dest, wantSHA string) error {
@@ -524,25 +486,16 @@ func tryDownload(url, dest, wantSHA string) error {
 		return fmt.Errorf("下载内容为空")
 	}
 	if wantSHA != "" {
-		if !looksLikeSHA256(wantSHA) {
-			os.Remove(tmp)
-			return fmt.Errorf("发布包中的校验值格式不正确（%q），已拒绝安装", truncateText(wantSHA, 32))
-		}
 		got := hex.EncodeToString(h.Sum(nil))
 		if !strings.EqualFold(got, wantSHA) {
 			os.Remove(tmp)
-			return fmt.Errorf("校验失败 (%s ≠ %s)", shortHash(got), shortHash(wantSHA))
+			return fmt.Errorf("校验失败 (%s ≠ %s)", got[:12], wantSHA[:12])
 		}
 	}
 	if err := os.Chmod(tmp, 0755); err != nil {
-		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, dest); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return os.Rename(tmp, dest)
 }
 
 // ================= 自身路径 / 重启 =================

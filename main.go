@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -12,21 +11,19 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
-	"io"
-	"log"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
+
 	"time"
 
 	"github.com/gin-contrib/sessions"
@@ -52,50 +49,7 @@ type PingTargetConfig struct {
 
 // dbPath 面板数据库文件位置。放在变量里而不是到处硬编码 "monitor.db"：
 // 系统信息页要显示真实路径，数据备份也要按它去找文件。
-//
-// 这里只保存【纯路径】，不带任何查询参数 —— databasePath() / databaseSize()
-// 会拿它去 stat 文件、admin.go 还要拼进 VACUUM INTO，带上 "?_pragma=…"
-// 会把这些地方全部拼错。连接串由 sqliteDSN() 单独生成。
 var dbPath = "monitor.db"
-
-// SQLite 运行参数，以 DSN 的 _pragma 查询项下发，由驱动在【每条连接】建立时
-// 逐条执行（modernc 系驱动的 _pragma 语义，已在本地实测确认生效）。
-//
-// 为什么必须显式写：不写时 journal_mode 就是默认的 delete（已实测），
-// 全部读写共用同一把文件锁 —— 十几个节点 5 秒一次心跳，外加告警落库、
-// 历史清理、审计写入，很容易撞成 "database is locked"。
-// 开启 WAL 后读不再阻塞写，是这种「单文件 + 多协程」面板能长期稳跑的前提。
-//
-//	journal_mode(WAL)    读并发不阻塞写，崩溃恢复也更可靠
-//	busy_timeout(5000)   遇到锁等待 5 秒而不是立即报错（驱动默认已是 5000，写明便于排障）
-//	synchronous(NORMAL)  WAL 下的推荐搭配：依然保证不损坏，省掉每次提交的 fsync
-const (
-	dbPragmaJournal = "journal_mode(WAL)"
-	dbPragmaBusy    = "busy_timeout(5000)"
-	dbPragmaSync    = "synchronous(NORMAL)"
-)
-
-// sqliteDSN 把纯路径转成带 PRAGMA 的连接串
-func sqliteDSN(path string) string {
-	return path + "?_pragma=" + dbPragmaJournal +
-		"&_pragma=" + dbPragmaBusy +
-		"&_pragma=" + dbPragmaSync
-}
-
-// tuneSQLitePool 约束连接池。
-//
-// WAL 允许「一个写 + 多个读」并行，但写与写之间仍要等 busy_timeout。
-// 池子开太大只会把等待排成更长的队列，开太小又会拖慢读接口，
-// 这里取一个保守上限，并定期回收空闲连接以免长期占着文件句柄。
-func tuneSQLitePool(g *gorm.DB) {
-	sqlDB, err := g.DB()
-	if err != nil {
-		return
-	}
-	sqlDB.SetMaxOpenConns(8)
-	sqlDB.SetMaxIdleConns(4)
-	sqlDB.SetConnMaxLifetime(time.Hour)
-}
 
 var (
 	statusCache = make(map[string]SystemStatus)
@@ -231,89 +185,29 @@ type AgentResponse struct {
 
 // ================= HTML 模版 =================
 
-// 模版只在服务端启动时解析一次，之后所有请求复用同一个 *template.Template。
-//
-// 早期实现是每个请求 template.New(...).Parse(htmlDashboard) 一遍，
-// 并且把返回的 error 丢掉。这有两个问题：
-//   - 性能：仪表盘模版近 150KB，每次打开页面都要重新做一遍词法/语法分析与
-//     JS 上下文推导，纯属白烧 CPU；
-//   - 可诊断性：Parse 失败会返回 nil，接着 Execute 就是空指针 panic ——
-//     现场只剩一个 500，看不出是模版坏了。
-//
-// 模版是编译进二进制的常量，解析失败等同构建事故，所以放在启动路径上
-// 直接失败（而不是在 agent / install 模式下也白白解析一遍）。
-var (
-	dashboardTmpl *template.Template
-	loginTmpl     *template.Template
-)
-
-func parseTemplates() error {
-	var err error
-	if dashboardTmpl, err = template.New("dashboard").Parse(htmlDashboard); err != nil {
-		return fmt.Errorf("解析仪表盘模版失败: %w", err)
-	}
-	if loginTmpl, err = template.New("login").Parse(htmlLogin); err != nil {
-		return fmt.Errorf("解析登录模版失败: %w", err)
-	}
-	return nil
-}
-
-// renderHTML 统一渲染入口。
-//
-// 显式写 Content-Type 而不是依赖 net/http 的内容嗅探：嗅探只在第一次 Write 时
-// 发生，一旦前面误写了别的字节就会退化成 text/plain。同时给页面加 no-store ——
-// 登录页与仪表盘里内联着 Agent 通信 Token、更新源等敏感配置，
-// 让它们进浏览器/中间层缓存既可能读到陈旧配置，也可能在共用设备上泄露。
-func renderHTML(c *gin.Context, t *template.Template, data map[string]interface{}) {
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.Header("Cache-Control", "no-store")
-	if err := t.Execute(c.Writer, data); err != nil {
-		log.Printf("[ui] 渲染模版失败: %v", err)
-	}
-}
-
 // ================= 主程序 =================
 
 func main() {
-	mode := flag.String("mode", "server", "运行模式: server / agent / install / version")
-	port := flag.String("port", "8080", "服务端监听端口（server 模式）")
-	sAddr := flag.String("server", "http://localhost:8080", "面板地址（agent / install 模式）")
-	tkn := flag.String("token", "", "Agent 通信 Token（agent / install 模式）")
-	aid := flag.String("id", "", "Agent 节点 ID（agent / install 模式）")
+	mode := flag.String("mode", "server", "Mode")
+	port := flag.String("port", "8080", "Port")
+	sAddr := flag.String("server", "http://localhost:8080", "Agent Server")
+	tkn := flag.String("token", "", "Agent Token")
+	aid := flag.String("id", "", "Agent ID")
 
-	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(),
-			"Hub Monitor %s —— 轻量级服务器监控面板\n\n用法: %s [选项]\n\n选项:\n",
-			displayVersion(), filepath.Base(os.Args[0]))
-		flag.PrintDefaults()
-	}
 	flag.Parse()
 
-	switch *mode {
-	case "agent":
+	if *mode == "agent" {
 		if *tkn == "" || *aid == "" {
-			fmt.Fprintln(os.Stderr, "错误: agent 模式必须提供 -token 与 -id")
-			os.Exit(2)
+			panic("Agent need -token and -id")
 		}
 		runAgent(*sAddr, *tkn, *aid)
-	case "install":
-		if *tkn == "" || *aid == "" {
-			fmt.Fprintln(os.Stderr, "错误: install 模式必须提供 -token 与 -id")
-			os.Exit(2)
-		}
+	} else if *mode == "install" {
 		installAgent(*sAddr, *tkn, *aid)
-	case "version", "v", "-v", "--version":
+	} else if *mode == "version" || *mode == "-v" {
 		fmt.Printf("Hub Monitor %s\ncommit: %s\nbuilt:  %s\nplatform: %s/%s\n",
 			displayVersion(), BuildCommit, BuildTime, runtime.GOOS, runtime.GOARCH)
-	case "server":
+	} else {
 		runServer(*port)
-	default:
-		// 早期版本把「不认识的模式」也当成 server 启动。
-		// 那会让 `-mode agnet` 这种拼写错误变成一个看起来正常、实际行为
-		// 完全不同的进程（占住 8080 端口），排查起来非常费劲。
-		fmt.Fprintf(os.Stderr, "错误: 未知模式 %q（可用: server / agent / install / version）\n", *mode)
-		flag.Usage()
-		os.Exit(2)
 	}
 }
 
@@ -323,33 +217,17 @@ func installAgent(server, token, id string) {
 	fmt.Println(">> 正在安装监控 Agent...")
 	binPath, err := filepath.Abs(os.Args[0])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "错误: 无法获取当前程序路径:", err)
-		os.Exit(1)
+		fmt.Println("错误: 无法获取文件路径")
+		return
 	}
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
-		err = installOpenRC(binPath, server, token, id)
+		installOpenRC(binPath, server, token, id)
 	} else {
-		err = installSystemd(binPath, server, token, id)
+		installSystemd(binPath, server, token, id)
 	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "❌ 安装失败:", err)
-		os.Exit(1)
-	}
-	fmt.Println("✅ 安装成功! 服务已启动并设置开机自启。")
 }
 
-// unitArg 把参数包成 systemd / OpenRC 都能正确还原的字面量。
-//
-// ExecStart 与 OpenRC 的 command_args 都按空白切分参数：面板地址或 Token 里
-// 只要出现空格，服务就会带着被截断的参数启动 —— 表现为「脚本说装好了，
-// 但节点永远不上线」，且现场日志里看不出任何异常。统一加双引号并转义
-// 反斜杠与双引号，两种服务管理器都能正确还原。
-func unitArg(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
-	return `"` + r.Replace(s) + `"`
-}
-
-func installSystemd(binPath, server, token, id string) error {
+func installSystemd(binPath, server, token, id string) {
 	fmt.Println("-> 检测到 Systemd 系统")
 	serviceContent := fmt.Sprintf(`[Unit]
 Description=VPS Monitor Agent
@@ -361,52 +239,27 @@ Restart=always
 RestartSec=5
 [Install]
 WantedBy=multi-user.target
-`, unitArg(binPath), unitArg(server), unitArg(token), unitArg(id))
-
-	const unitPath = "/etc/systemd/system/monitor.service"
-	// 早期实现忽略 WriteFile 的返回值，于是「没用 root 运行 / /etc 只读」时
-	// 依然会打印「安装成功」，而服务其实根本不存在。这类假成功最难排查：
-	// 用户以为自己装好了，回头只会怀疑网络。
-	if err := os.WriteFile(unitPath, []byte(serviceContent), 0644); err != nil {
-		return fmt.Errorf("写入 %s 失败（请确认以 root 运行）: %w", unitPath, err)
-	}
-	// daemon-reload 必须先成功，否则后面的 enable / restart 读不到新的 unit 文件
-	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl daemon-reload 失败: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-	if out, err := exec.Command("systemctl", "enable", "monitor").CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl enable monitor 失败: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-	// 用 restart 而不是 start：重复安装（升级）时也能真正加载新二进制
-	if out, err := exec.Command("systemctl", "restart", "monitor").CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl restart monitor 失败: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+`, binPath, server, token, id)
+	ioutil.WriteFile("/etc/systemd/system/monitor.service", []byte(serviceContent), 0644)
+	exec.Command("systemctl", "daemon-reload").Run()
+	exec.Command("systemctl", "enable", "monitor").Run()
+	exec.Command("systemctl", "restart", "monitor").Run()
+	fmt.Println("✅ 安装成功! 服务已启动并设置开机自启。")
 }
 
-func installOpenRC(binPath, server, token, id string) error {
+func installOpenRC(binPath, server, token, id string) {
 	fmt.Println("-> 检测到 Alpine (OpenRC) 系统")
 	scriptContent := fmt.Sprintf(`#!/sbin/openrc-run
 name="monitor"
-command=%s
+command="%s"
 command_args="-mode agent -server %s -token %s -id %s"
 command_background=true
 pidfile="/run/monitor.pid"
-`, unitArg(binPath), unitArg(server), unitArg(token), unitArg(id))
-
-	const initPath = "/etc/init.d/monitor"
-	if err := os.WriteFile(initPath, []byte(scriptContent), 0755); err != nil {
-		return fmt.Errorf("写入 %s 失败（请确认以 root 运行）: %w", initPath, err)
-	}
-	if out, err := exec.Command("rc-update", "add", "monitor", "default").CombinedOutput(); err != nil {
-		return fmt.Errorf("rc-update add monitor default 失败: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-	// 残留的 pidfile 会让 OpenRC 认定服务已在运行，于是「启动成功」但实际没起
-	os.Remove("/run/monitor.pid")
-	if out, err := exec.Command("rc-service", "monitor", "restart").CombinedOutput(); err != nil {
-		return fmt.Errorf("rc-service monitor restart 失败: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+`, binPath, server, token, id)
+	ioutil.WriteFile("/etc/init.d/monitor", []byte(scriptContent), 0755)
+	exec.Command("rc-update", "add", "monitor").Run()
+	exec.Command("rc-service", "monitor", "restart").Run()
+	fmt.Println("✅ 安装成功! 服务已启动并设置开机自启。")
 }
 
 // ================= 安装命令生成 =================
@@ -432,24 +285,14 @@ func installCommand(serverURL, token, id string) string {
 // ================= 服务端 =================
 
 func runServer(port string) {
-	dbPath = "monitor.db"
 	var err error
-	db, err = gorm.Open(sqlite.Open(sqliteDSN(dbPath)), &gorm.Config{})
+	dbPath = "monitor.db"
+	db, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("[fatal] 打开数据库失败: %v", err)
-	}
-	tuneSQLitePool(db)
-
-	// 建表失败必须当场退出：硬撑下去只会得到一个「登录页打得开、一保存就 500」
-	// 的半死状态，比启动失败难定位得多。
-	if err := db.AutoMigrate(&User{}, &AppConfig{}, &Node{}, &MonitorHistory{}, &AuditLog{}, &AlertEvent{}); err != nil {
-		log.Fatalf("[fatal] 数据库结构初始化失败: %v", err)
-	}
-	// 模版是编译进二进制的常量，解析失败等同构建事故，启动即失败
-	if err := parseTemplates(); err != nil {
-		log.Fatalf("[fatal] %v", err)
+		panic(err)
 	}
 
+	db.AutoMigrate(&User{}, &AppConfig{}, &Node{}, &MonitorHistory{}, &AuditLog{}, &AlertEvent{})
 	loadGlobalConfig()
 	go monitorAlerts()
 	go cleanupMaintenance()
@@ -463,30 +306,19 @@ func runServer(port string) {
 	// 这里显式关掉信任代理，ClientIP()/RemoteIP() 一律回落到真实 TCP 对端。
 	_ = r.SetTrustedProxies(nil)
 
-	// 统一安全响应头 + 请求体上限
-	r.Use(securityHeaders(), limitBodySize(2<<20))
-
 	// PWA：manifest / Service Worker / 运行时绘制的图标 / 离线页
 	registerPWARoutes(r)
 
-	// 明确要求爬虫不要收录。面板可能直接暴露在公网，默认的仪表盘对
-	// 未登录访客可见（只隐藏 IP），被搜索引擎收录后节点名称与负载情况
-	// 就等于公开了。X-Robots-Tag 已覆盖现代爬虫，这里再给一份传统声明。
-	r.GET("/robots.txt", func(c *gin.Context) {
-		c.Header("Cache-Control", "public, max-age=86400")
-		c.String(http.StatusOK, "User-agent: *\nDisallow: /\n")
-	})
-
 	// 安全增强: 随机生成 Session Key
-	sessionKey, err := sessionKeyFromEnv()
-	if err != nil {
-		log.Fatalf("[fatal] %v", err)
+	var sessionKey []byte
+	if envKey := os.Getenv("SESSION_KEY"); envKey != "" {
+		sessionKey = []byte(envKey)
+	} else {
+		sessionKey = make([]byte, 32)
+		rand.Read(sessionKey)
 	}
 	store := cookie.NewStore(sessionKey)
 	// 安全增强: Cookie 属性设置
-	// Secure 交给每个请求单独判定（见 saveSession / sessionOptions）：
-	// 面板常以明文 HTTP 部署在内网，无条件打开会让浏览器直接丢掉会话 Cookie，
-	// 表现为「登录成功但立刻又跳回登录页」。
 	store.Options(sessions.Options{Path: "/", MaxAge: 3600 * 24, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	r.Use(sessions.Sessions("mysession", store))
 
@@ -531,7 +363,7 @@ func runServer(port string) {
 		if clientToken == "" {
 			clientToken = c.Query("token")
 		}
-		if !tokenEqual(clientToken, t) {
+		if clientToken == "" || clientToken != t {
 			c.AbortWithStatus(401)
 			return
 		}
@@ -573,7 +405,8 @@ func runServer(port string) {
 		bgBlur := globalConfig.BgBlur
 		cardOp := globalConfig.CardOpacity
 		globalConfig.RUnlock()
-		renderHTML(c, loginTmpl, map[string]interface{}{
+		t, _ := template.New("s").Parse(htmlLogin)
+		t.Execute(c.Writer, map[string]interface{}{
 			"Action":   "/setup",
 			"Title":    "初始化设置",
 			"Subtitle": "创建管理员账号",
@@ -637,7 +470,8 @@ func runServer(port string) {
 		bgBlur := globalConfig.BgBlur
 		cardOp := globalConfig.CardOpacity
 		globalConfig.RUnlock()
-		renderHTML(c, loginTmpl, map[string]interface{}{
+		t, _ := template.New("l").Parse(htmlLogin)
+		t.Execute(c.Writer, map[string]interface{}{
 			"Action":   "/login",
 			"Title":    "登录",
 			"Subtitle": "请登录以管理您的节点",
@@ -673,7 +507,7 @@ func runServer(port string) {
 				s := sessions.Default(c)
 				s.Set("user", u)
 				s.Set("epoch", sessionEpoch())
-				saveSession(c, s)
+				s.Save()
 				auditAs(c, u, "login", u, "登录成功", true)
 				c.Redirect(302, "/")
 				return
@@ -695,7 +529,7 @@ func runServer(port string) {
 		audit(c, "logout", "", "退出登录", true)
 		s := sessions.Default(c)
 		s.Clear()
-		saveSession(c, s)
+		s.Save()
 		c.Redirect(302, "/")
 	})
 
@@ -712,7 +546,7 @@ func runServer(port string) {
 				clientToken = c.Query("token")
 			} // 兼容旧方式
 
-			if !tokenEqual(clientToken, t) {
+			if clientToken != t {
 				c.AbortWithStatus(401)
 				return
 			}
@@ -736,7 +570,18 @@ func runServer(port string) {
 				}
 
 				if node.CountryCode == "" {
-					go resolveCountryAsync(s.AgentID, s.IP)
+					go func(aid, ip string) {
+						resp, err := http.Get("http://ip-api.com/json/" + ip)
+						if err == nil {
+							defer resp.Body.Close()
+							var res struct {
+								CountryCode string `json:"countryCode"`
+							}
+							if json.NewDecoder(resp.Body).Decode(&res) == nil && res.CountryCode != "" {
+								db.Model(&Node{}).Where("agent_id=?", aid).Update("country_code", res.CountryCode)
+							}
+						}
+					}(s.AgentID, s.IP)
 				}
 
 				// [新增] 同步客户端架构 / 版本，并处理更新回执
@@ -1242,66 +1087,8 @@ func runServer(port string) {
 		}
 	}
 
-	// ================= 启动 HTTP 服务 =================
-	//
-	// 用 http.Server 而不是 gin 的 r.Run()，为了三件事：
-	//
-	//  ① 超时。裸 http.Server 的四个超时默认全是 0，也就是【永不超时】。
-	//     一个只发请求头、迟迟不发完的连接就能永久占住一个连接槽，
-	//     几百个这样的连接就足以把面板拖垮 —— 这是最经典的 Slowloris。
-	//     gin 的 r.Run() 内部就是这么起的，没有任何超时。
-	//
-	//  ② 优雅退出。收到 SIGTERM 后等在途请求写完再退，否则 systemctl restart
-	//     时正在导出 CSV / 做在线备份的请求会被直接切断，用户只看到连接重置。
-	//
-	//  ③ 启动失败可诊断。端口被占用时 r.Run() 只把 error 返回给调用方并被丢弃，
-	//     进程看起来「在跑」但其实没在监听，systemd 还会一直把它拉起来。
-	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: r,
-		// 只覆盖请求头读取，是防 Slowloris 最关键的一项，10 秒足够任何正常客户端
-		ReadHeaderTimeout: 10 * time.Second,
-		// 覆盖请求体读取。面板最大的请求体是节点批量操作的 JSON，2 分钟绰绰有余
-		ReadTimeout: 2 * time.Minute,
-		// 覆盖业务处理 + 响应写出。数据导出与在线备份可能跑几十秒，给宽一些
-		WriteTimeout: 10 * time.Minute,
-		// 长连接空闲回收。面板前端每 2~5 秒轮询一次，用不到很长的空闲保持
-		IdleTimeout: 2 * time.Minute,
-		// 面板没有任何需要大请求头的接口，1 MiB 已远超正常值
-		MaxHeaderBytes: 1 << 20,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		log.Printf(">> Hub Monitor %s 已启动: http://localhost:%s", displayVersion(), port)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
-
-	// Ctrl-C 与 systemctl stop 分别对应 SIGINT / SIGTERM，两者都要接住
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-
-	select {
-	case err := <-errCh:
-		log.Fatalf("[fatal] 监听 %s 失败: %v", srv.Addr, err)
-	case sig := <-quit:
-		log.Printf(">> 收到信号 %v，正在优雅退出…", sig)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("[warn] 优雅退出超时，强制关闭: %v", err)
-		_ = srv.Close()
-	}
-	// 关库时 SQLite 会做一次 WAL checkpoint，把 -wal 里的数据合并回主文件。
-	// 跳过这一步直接拷 monitor.db，拿到的可能是 checkpoint 之前的旧数据。
-	if sqlDB, err := db.DB(); err == nil {
-		_ = sqlDB.Close()
-	}
-	log.Println(">> 已退出")
+	fmt.Printf(">> http://localhost:%s\n", port)
+	r.Run(":" + port)
 }
 
 // randomToken 生成一个 24 位十六进制随机串，用于首次运行时的 Agent 通信 Token。
@@ -1462,6 +1249,7 @@ func saveConfig(k, v string) {
 
 func dashboardHandler(c *gin.Context) {
 	isAdmin := isAdminSession(c)
+	t, _ := template.New("d").Parse(htmlDashboard)
 	sch := "http://"
 	if c.Request.TLS != nil {
 		sch = "https://"
@@ -1504,7 +1292,7 @@ func dashboardHandler(c *gin.Context) {
 		whFmt = "generic"
 	}
 
-	renderHTML(c, dashboardTmpl, map[string]interface{}{
+	t.Execute(c.Writer, map[string]interface{}{
 		"BrowserURL": sch + c.Request.Host, "CustomServerURL": u, "Token": tk, "TGToken": tgt, "TGChatID": tgc, "WebhookURL": wh,
 		"WebhookFormat": whFmt, "BcryptCost": bcryptCost,
 		"AdminName":   currentUser(c),
@@ -1518,118 +1306,6 @@ func dashboardHandler(c *gin.Context) {
 		"Version": displayVersion(), "UpdateRepo": repo, "UpdateProxy": proxy,
 		"RestartCmd": rCmd, "AgentBundleVersion": bundle,
 	})
-}
-
-// ================= 会话 Cookie =================
-//
-// gin-contrib/sessions 的 CookieStore 支持【按请求】覆盖 Cookie 属性：
-// session.Options() 写的是本次会话对象上的值，Save() 时直接读它
-// （gorilla/sessions 的 CookieStore.Save 用的是 session.Options，
-// 而不是 store 的默认值）。于是 Secure 可以逐次按「这次到底是不是 HTTPS」决定。
-
-// secureRequest 判断当前请求是否经由 HTTPS 到达。
-//
-// 直接终止 TLS 时看 Request.TLS；反向代理后面则看 X-Forwarded-Proto。
-// 这里刻意不校验该头的来源：它只用来决定 Cookie 的 Secure 属性，
-// 伪造它最多让攻击者自己的浏览器存不下会话 Cookie（等于把自己踢下线），
-// 无法据此降级传输或窃取他人会话 —— 因此无需接入可信代理白名单，
-// 也就不会与上面 SetTrustedProxies(nil) 的「按真实 IP 限流」目标冲突。
-func secureRequest(c *gin.Context) bool {
-	if c.Request.TLS != nil {
-		return true
-	}
-	return strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")), "https")
-}
-
-// sessionOptions 本次请求使用的 Cookie 属性。
-//
-// Secure 只在 HTTPS 下打开：面板大量部署在纯 HTTP 内网，无条件加 Secure
-// 会让浏览器直接丢弃会话 Cookie，表现为「密码明明对了、登录也成功了，
-// 但立刻又跳回登录页」这种极难自查的现象。
-func sessionOptions(c *gin.Context) sessions.Options {
-	return sessions.Options{
-		Path:     "/",
-		MaxAge:   3600 * 24,
-		HttpOnly: true,
-		Secure:   secureRequest(c),
-		SameSite: http.SameSiteStrictMode,
-	}
-}
-
-// saveSession 保存会话并统一套用 Cookie 属性。
-// 写失败只记日志：会话存不下来不该把业务接口一起带崩。
-func saveSession(c *gin.Context, s sessions.Session) {
-	s.Options(sessionOptions(c))
-	if err := s.Save(); err != nil {
-		log.Printf("[session] 保存会话失败: %v", err)
-	}
-}
-
-// sessionKeyFromEnv 取得会话签名密钥。
-//
-// 未设置 SESSION_KEY 时每次启动随机生成：好处是「重启即让全部会话失效」，
-// 代价是重启后需要重新登录。设置了则跨重启保持登录态 —— 因此必须校验长度，
-// 否则用户图省事填个 "123456"，在线爆破 Cookie 签名会比爆破密码容易得多。
-func sessionKeyFromEnv() ([]byte, error) {
-	if v := strings.TrimSpace(os.Getenv("SESSION_KEY")); v != "" {
-		if len(v) < 32 {
-			return nil, fmt.Errorf(
-				"SESSION_KEY 至少需要 32 个字符（当前 %d 个）；留空则由面板每次启动随机生成", len(v))
-		}
-		return []byte(v), nil
-	}
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		// crypto/rand 失败说明系统熵源异常，此时生成的密钥不可信；
-		// 拿它签名等于把管理员会话拱手让人，所以拒绝启动而不是降级。
-		return nil, fmt.Errorf("生成会话密钥失败（系统随机源不可用）: %w", err)
-	}
-	return key, nil
-}
-
-// securityHeaders 统一注入一批「只做加法」的安全响应头。
-//
-// 选的都是不会破坏页面的项：
-//   - nosniff           阻止浏览器把 JSON / 文本响应猜成脚本执行
-//   - X-Frame-Options   防点击劫持（frame-ancestors 覆盖现代浏览器）
-//   - Referrer-Policy   跳转外部（Bing 壁纸、自定义背景图）时不带出面板完整地址
-//   - X-Robots-Tag      仪表盘默认对未登录访客可见，必须明确要求搜索引擎不要收录
-//
-// 这里刻意【不】下发完整的 Content-Security-Policy：前端依赖内联 script/style，
-// 图表与字体来自 CDN，背景图还允许用户填任意 URL —— 一份写死的 CSP
-// 极易把界面打坏，而「打坏 CSP」比「没有 CSP」更糟，因为没人会立刻发现功能没了。
-// 只保留不依赖资源白名单的三条指令：不限制任何正常加载，但能挡住插件嵌入、
-// <base> 劫持与跨站 iframe 嵌套。
-func securityHeaders() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		h := c.Writer.Header()
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "SAMEORIGIN")
-		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("X-Robots-Tag", "noindex, nofollow")
-		h.Set("Permissions-Policy", "geolocation=(), camera=(), microphone=()")
-		h.Set("Content-Security-Policy", "frame-ancestors 'self'; base-uri 'none'; object-src 'none'")
-		if secureRequest(c) {
-			// HSTS 一旦被浏览器记住就无法撤销，所以只在确认走了 HTTPS 时才发，
-			// 免得把纯 HTTP 内网部署的浏览器直接锁死在 https 上。
-			h.Set("Strict-Transport-Security", "max-age=31536000")
-		}
-		c.Next()
-	}
-}
-
-// limitBodySize 给请求体设硬上限。
-//
-// Go 的 JSON 解码会把整个 body 读进内存，而面板没有任何接口需要大请求体
-// （最大的是节点批量操作的 JSON，几 KB 量级）。没有上限时，
-// 一个几 GB 的 POST 就能把进程内存打满。
-func limitBodySize(max int64) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if c.Request.Body != nil {
-			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, max)
-		}
-		c.Next()
-	}
 }
 
 func authMiddleware() gin.HandlerFunc {
@@ -1647,7 +1323,7 @@ func authMiddleware() gin.HandlerFunc {
 			s := sessions.Default(c)
 			if s.Get("user") != nil {
 				s.Clear()
-				saveSession(c, s)
+				s.Save()
 			}
 			c.Redirect(302, "/login")
 			c.Abort()
@@ -1725,46 +1401,6 @@ func cleanField(v string, max int) string {
 	return strings.TrimSpace(v)
 }
 
-// cleanMultiline 与 cleanField 同样的收敛逻辑，但保留换行。
-//
-// 为什么需要单独一个：告警文案天然是多行的（「🔴 节点离线\n名称：…\nID：…」），
-// 前端拿到之后会把 \n 换成 " · " 再渲染成一行。而 cleanField 会把 \n 当作
-// 控制字符直接删掉 —— 于是落到告警历史里的就变成
-// 「🔴 节点离线名称：hk-01ID：abc」这样一整串粘死的文字，
-// 页面上那个分隔符永远不会出现，可读性极差。
-func cleanMultiline(v string, max int) string {
-	// 先统一换行符：否则 \r\n 中的 \r 会被当普通控制字符删掉，
-	// 留下孤立的 \n，看上去没问题但长度计算会偏。
-	v = strings.ReplaceAll(v, "\r\n", "\n")
-	v = strings.ReplaceAll(v, "\r", "\n")
-	v = strings.Map(func(r rune) rune {
-		if r == '\n' {
-			return r
-		}
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, v)
-	if rs := []rune(v); len(rs) > max {
-		v = string(rs[:max])
-	}
-	return strings.TrimSpace(v)
-}
-
-// tokenEqual 以常量时间比较 Agent 通信 Token。
-//
-// 普通的 != 会在第一个不同的字节处提前返回，理论上可以按响应耗时逐字节
-// 猜出 Token。网络抖动远大于单字节比较的差异，现实中很难利用，
-// 但 Token 是全部节点身份的唯一凭据 —— 没有理由不为它换成常量时间比较，
-// 何况 crypto/subtle 本来就已经为了校验旧口令哈希而引入了。
-func tokenEqual(got, want string) bool {
-	if got == "" || want == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
-}
-
 // sanitizeReport 收敛 Agent 上报的文本字段。
 //
 // 这些字段（os / ip / version / arch / agent_id）会原样出现在面板界面上，
@@ -1789,100 +1425,6 @@ func sanitizeReport(s *SystemStatus) {
 	if s.DiskTotal > maxSaneBytes {
 		s.DiskTotal = 0
 	}
-
-	// 百分比字段同样不可信。前端直接拿它们当进度条宽度（width: 137%）与
-	// 大号数字渲染，一个 1e9 或负值就能把整张卡片顶坏。
-	// 合法值域只有 0~100，越界一律夹到边界（而不是置零：置零会让一台
-	// 真实负载 100% 的机器显示成空闲，比显示 100% 更容易误导）。
-	s.CPUUsage = clampPercent(s.CPUUsage)
-	s.MemUsedPercent = clampPercent(s.MemUsedPercent)
-	s.DiskUsedPercent = clampPercent(s.DiskUsedPercent)
-}
-
-// clampPercent 把百分比夹到 [0,100]。
-// JSON 没有 NaN 字面量，所以不需要额外处理 NaN。
-func clampPercent(v float64) float64 {
-	if v < 0 {
-		return 0
-	}
-	if v > 100 {
-		return 100
-	}
-	return v
-}
-
-// ================= 归属地查询 =================
-//
-// 这是面板唯一访问外部服务的地方：拿节点 IP 换国家代码，用于在卡片上显示旗帜。
-// 三个必须收口的点：
-//
-//  1. 必须带超时。原实现用的是 http.Get（等价 http.DefaultClient），
-//     它的 Timeout 是 0 —— 也就是永不超时。对方只要挂住连接，这个 goroutine
-//     就永久泄漏，而且节点越多泄漏越多。
-//
-//  2. 拼进 URL 之前必须确认它是合法 IP。s.IP 来自 Agent 上报，sanitizeReport
-//     只做了去控制字符与限长，没有做格式校验 —— 不校验就等于把一段任意
-//     字符串拼进了请求路径。
-//
-//  3. 同一个节点只允许一个在途查询。原实现是每次心跳都起一个 goroutine，
-//     而 ip-api.com 免费版有频率限制，节点一多就会互相挤成 429，
-//     结果谁都查不到、还每 5 秒重试一轮。
-//
-// 注：免费接口只有 http://，没有 https。这里换来的只是一个国家代码，
-// 且结果只用于展示，不接受 https 之外的加固手段。
-var (
-	geoClient = &http.Client{Timeout: 5 * time.Second}
-
-	geoInflight struct {
-		sync.Mutex
-		m map[string]bool
-	}
-)
-
-func resolveCountryAsync(agentID, ip string) {
-	ip = strings.TrimSpace(ip)
-	if net.ParseIP(ip) == nil {
-		return
-	}
-
-	geoInflight.Lock()
-	if geoInflight.m == nil {
-		geoInflight.m = make(map[string]bool)
-	}
-	if geoInflight.m[agentID] {
-		geoInflight.Unlock()
-		return
-	}
-	geoInflight.m[agentID] = true
-	geoInflight.Unlock()
-
-	defer func() {
-		geoInflight.Lock()
-		delete(geoInflight.m, agentID)
-		geoInflight.Unlock()
-	}()
-
-	resp, err := geoClient.Get("http://ip-api.com/json/" + url.PathEscape(ip))
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
-
-	var res struct {
-		CountryCode string `json:"countryCode"`
-	}
-	// 限长读取：响应内容由对方决定，不能让一个超长 body 把内存吃掉
-	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&res) != nil {
-		return
-	}
-	if len(res.CountryCode) != 2 {
-		return
-	}
-	db.Model(&Node{}).Where("agent_id = ?", agentID).
-		Update("country_code", strings.ToUpper(res.CountryCode))
 }
 
 // ================= Agent =================
@@ -2015,9 +1557,7 @@ func runAgent(server, token, id string) {
 		resp, err := client.Do(req)
 
 		if err == nil {
-			// 限长读取：响应来自面板，正常只有几百字节；
-			// 万一对面被换成了别的服务，也不至于把 Agent 的内存吃光。
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+			body, _ := ioutil.ReadAll(resp.Body)
 			resp.Body.Close()
 			var serverResp AgentResponse
 			if json.Unmarshal(body, &serverResp) == nil {
