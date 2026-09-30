@@ -914,23 +914,6 @@ table.tbl td.mono{font-family:'Menlo',monospace;font-size:11.5px;white-space:now
               </div>
             </div>
           </div>
-          <div class="card-soft">
-            <div class="form-label" style="margin-bottom:4px">反向代理与客户端 IP</div>
-            <div class="form-hint" style="margin-bottom:10px">
-              面板部署在 nginx / Caddy / Cloudflare 之类的代理后面时，必须在这里填上代理的出口地址（或网段）。<br>
-              <b>只有对端确实落在白名单里</b>，面板才会采信 <code>X-Forwarded-For</code> 来识别客户端地址。
-              留空或填漏时，面板看到的是代理自己的地址，节点旗帜会显示成代理所在国；
-              同机反代与 Docker 桥接更糟 —— 拿到的是 127.0.0.1 / 172.17.0.1 这类私网地址，
-              定位直接失败，卡片上只剩一面白旗。<br>
-              审计与登录限流<b>始终只认真实 TCP 对端</b>，不受这里影响。留空表示不信任任何代理（直连部署请保持留空）。
-            </div>
-            <div class="row">
-              <input type="text" id="trustedProxiesInput" class="input-text" style="flex:1;min-width:180px" placeholder="例如: 172.17.0.1 或 10.0.0.0/8，多个用逗号分隔">
-              <button class="btn-primary btn-sm" onclick="saveTrustedProxies()">保存</button>
-              <button class="btn-outline btn-sm" onclick="refreshGeo()">重新定位全部节点</button>
-            </div>
-            <div class="form-hint" style="margin:10px 0 0" id="proxyHint"></div>
-          </div>
           <div class="form-group">
             <label class="form-label">节点名称</label>
             <div class="form-hint">输入名称后点击按钮，节点会立即创建，<b>安装命令自动复制到剪贴板</b>。</div>
@@ -1646,7 +1629,7 @@ function switchTab(t){
   if(t==='account') loadSecurity();
   if(t==='audit') loadAudit(1);
   if(t==='update' && !latestVersion) checkUpdate(true);
-  if(t==='install'){ refreshInstallInfo(); loadProxySettings(); }
+  if(t==='install') refreshInstallInfo();
 }
 /* 提示面板当前缓存了哪些架构的客户端二进制：
    arm64 没缓存时，arm64 机器执行安装命令会拿到 404，提前告知避免踩坑 */
@@ -1659,40 +1642,6 @@ function refreshInstallInfo(){
       ? '📦 面板已缓存客户端二进制: <b>'+a.join(' / ')+'</b>'
       : '⚠️ 面板尚未缓存任何客户端二进制。若目标机器是 <b>arm64</b> 且面板自身为 amd64，安装会失败 —— 请先到「版本更新 → 同步最新版本」。';
   }).catch(function(){ el.innerHTML=''; });
-}
-/* 反代白名单：把「面板看到的对端」直接回显出来，用户照着填就行 ——
-   让他自己去猜代理的出口地址，十有八九会填错 */
-function loadProxySettings(){
-  if(!isAdmin) return;
-  fetch('/api/settings/proxy').then(function(r){return r.json()}).then(function(d){
-    var el=document.getElementById('trustedProxiesInput');
-    if(el&&!el.value) el.value=d.trusted_proxies||'';
-    var h=document.getElementById('proxyHint');
-    if(!h) return;
-    var eff=(d.effective&&d.effective.length)
-      ? '当前生效白名单：<b>'+escapeHtml(d.effective.join(' , '))+'</b>'
-      : '当前<b>不信任任何代理</b>，客户端地址一律取 TCP 对端';
-    h.innerHTML='本次请求看到的对端地址：<code>'+escapeHtml(d.peer||'—')+'</code>　'+
-      '按此判断出的客户端地址：<code>'+escapeHtml(d.client||'—')+'</code><br>'+eff;
-  }).catch(function(){});
-}
-function saveTrustedProxies(){
-  var v=document.getElementById('trustedProxiesInput').value.trim();
-  fetch('/api/settings/proxy',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:'trusted_proxies='+encodeURIComponent(v)})
-  .then(function(r){
-    // 服务端会拒绝 0.0.0.0/0 之类的写法，必须把原因显示出来
-    if(!r.ok) return r.text().then(function(t){throw new Error(t||'保存失败');});
-    return r.json();
-  })
-  .then(function(){ toast('可信代理已保存，立即生效','ok'); loadProxySettings(); })
-  .catch(function(e){ toast('❌ '+(e.message||'保存失败'),'err'); });
-}
-function refreshGeo(){
-  fetch('/api/settings/geo/refresh',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
-    toast('已重新排队定位 '+d.queued+' 个节点','ok');
-    setTimeout(updateStats,1500);
-  }).catch(function(){ toast('重新定位失败','err'); });
 }
 function openSettings(){
   document.getElementById('settingsModal').classList.add('open');
@@ -2392,7 +2341,6 @@ var actionNames={
   update_server:'面板自更新',agent_sync:'同步客户端',agent_push:'下发客户端更新',agent_push_batch:'批量下发更新',
   update_source:'修改更新源',
   data_cleanup:'清理数据',data_export:'导出数据',db_backup:'数据库备份',retention_save:'保存保留策略',
-  trusted_proxies:'可信代理白名单',geo_refresh:'重新定位节点',
   audit_clear:'清理操作日志'
 };
 function actionLabel(a){ return actionNames[a]||a||'-'; }
